@@ -9,6 +9,24 @@
 #define PANEL_RES_X 64      // Number of pixels wide of each INDIVIDUAL panel module. 
 #define PANEL_RES_Y 32     // Number of pixels tall of each INDIVIDUAL panel module.
 #define PANEL_CHAIN 1      // Total number of panels chained one to another
+
+// HUB75 wiring for a 38-pin ESP32-WROOM-32 development board.
+// These GPIOs avoid the flash bus (6-11), input-only pins (34-39),
+// UART0 (1 and 3), and boot-strapping pins (0, 2, 4, 5, 12 and 15).
+#define HUB75_R1   25
+#define HUB75_G1   26
+#define HUB75_B1   27
+#define HUB75_R2   14
+#define HUB75_G2   13
+#define HUB75_B2   33
+#define HUB75_A    23
+#define HUB75_B    19
+#define HUB75_C    18
+#define HUB75_D    17
+#define HUB75_E    -1      // Not used by a 64x32 (1/16 scan) panel
+#define HUB75_LAT  32
+#define HUB75_OE   21
+#define HUB75_CLK  22
  
 //MatrixPanel_I2S_DMA dma_display;
 MatrixPanel_I2S_DMA *dma_display = nullptr;
@@ -94,7 +112,23 @@ void setup() {
     PANEL_CHAIN    // Chain length
   );
 
-  //mxconfig.gpio.e = 18;
+  // Do not rely on the library defaults: they differ between ESP32 variants
+  // and commonly include GPIO12, an ESP32-WROOM-32 boot-strapping pin.
+  mxconfig.gpio.r1 = HUB75_R1;
+  mxconfig.gpio.g1 = HUB75_G1;
+  mxconfig.gpio.b1 = HUB75_B1;
+  mxconfig.gpio.r2 = HUB75_R2;
+  mxconfig.gpio.g2 = HUB75_G2;
+  mxconfig.gpio.b2 = HUB75_B2;
+  mxconfig.gpio.a = HUB75_A;
+  mxconfig.gpio.b = HUB75_B;
+  mxconfig.gpio.c = HUB75_C;
+  mxconfig.gpio.d = HUB75_D;
+  mxconfig.gpio.e = HUB75_E;
+  mxconfig.gpio.lat = HUB75_LAT;
+  mxconfig.gpio.oe = HUB75_OE;
+  mxconfig.gpio.clk = HUB75_CLK;
+
   //mxconfig.clkphase = false;
   //mxconfig.driver = HUB75_I2S_CFG::FM6126A;
 

@@ -1,30 +1,32 @@
-# ESP32-S3 HUB75 Matrix Test
+# ESP32-WROOM-32 HUB75 Matrix Test
 
-PlatformIO example for driving one 64×32 HUB75 LED matrix with an
-[Olimex ESP32-S3-DevKit-LiPo](https://www.olimex.com/Products/IoT/ESP32-S3/ESP32-S3-DevKit-Lipo/open-source-hardware).
+PlatformIO example for driving one 64×32 HUB75 LED matrix with a 38-pin
+ESP32 development board containing an ESP32-WROOM-32 module.
 
 ## Wiring
 
-| HUB75 signal | ESP32-S3 GPIO |
+| HUB75 signal | ESP32-WROOM-32 GPIO |
 | --- | ---: |
-| R1 | 4 |
-| G1 | 5 |
-| B1 | 6 |
-| R2 | 7 |
-| G2 | 15 |
-| B2 | 16 |
-| A | 18 |
-| B | 8 |
-| C | 3 |
-| D | 42 |
+| R1 | 25 |
+| G1 | 26 |
+| B1 | 27 |
+| R2 | 14 |
+| G2 | 13 |
+| B2 | 33 |
+| A | 23 |
+| B | 19 |
+| C | 18 |
+| D | 17 |
 | E | Not connected |
-| LAT / STB | 40 |
-| OE | 2 |
-| CLK | 41 |
+| LAT / STB | 32 |
+| OE | 21 |
+| CLK | 22 |
 | GND | GND |
 
-GPIO5 and GPIO6 share the board's optional power- and battery-sensing
-circuits. Leave the corresponding solder jumpers open when using this wiring.
+This mapping intentionally avoids GPIO6-GPIO11 (connected to the module's
+flash), GPIO34-GPIO39 (input only), UART0 GPIO1/GPIO3, and the ESP32 boot
+strapping pins. Do not substitute GPIO34-GPIO39 for any HUB75 signal: every
+signal in this table is driven by the ESP32.
 
 Power the matrix from a separate regulated 5 V supply capable of providing
 the required current. Connect the matrix supply ground to the ESP32 ground.
@@ -39,6 +41,3 @@ pio run
 pio run --target upload
 pio device monitor
 ```
-
-The project-local board definition in `boards/` configures the Olimex
-ESP32-S3-WROOM-1-N8R8 module with 8 MB flash and 8 MB PSRAM.
