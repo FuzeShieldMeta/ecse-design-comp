@@ -1,24 +1,22 @@
-
-// Example sketch which shows how to display some patterns on two
-// vertically stacked 64x32 panels as one 64x64 display.
-//
+/*
+ * Plasma effect adapted from the ESP32 HUB75 DMA library's PatternPlasma
+ * example and the Pixelmatix Aurora / LedEffects Plasma projects.
+ */
 
 #include <ESP32-HUB75-VirtualMatrixPanel_T.hpp>
+#include <FastLED.h>
 
-
-#define PANEL_RES_X 64      // Number of pixels wide of each INDIVIDUAL panel module. 
-#define PANEL_RES_Y 32     // Number of pixels tall of each INDIVIDUAL panel module.
-#define PANEL_ROWS  2      // Two panels stacked vertically
+// Two 64x32 modules stacked vertically and exposed as one 64x64 display.
+#define PANEL_RES_X 64
+#define PANEL_RES_Y 32
+#define PANEL_ROWS  2
 #define PANEL_COLS  1
 #define PANEL_CHAIN (PANEL_ROWS * PANEL_COLS)
 
 // Panel 1 starts at the top-right and its OUT connector feeds panel 2.
-// Change this if your physical input connector is in a different corner.
 #define PANEL_CHAIN_TYPE CHAIN_TOP_RIGHT_DOWN
 
-// HUB75 wiring for a 38-pin ESP32-WROOM-32 development board.
-// These GPIOs avoid the flash bus (6-11), input-only pins (34-39),
-// UART0 (1 and 3), and boot-strapping pins (0, 2, 4, 5, 12 and 15).
+// Existing ESP32 DevKit to HUB75 wiring.
 #define HUB75_R1   25
 #define HUB75_G1   26
 #define HUB75_B1   27
@@ -29,98 +27,35 @@
 #define HUB75_B    19
 #define HUB75_C    18
 #define HUB75_D    17
-#define HUB75_E    -1      // Not used by a 64x32 (1/16 scan) panel
+#define HUB75_E    -1
 #define HUB75_LAT  32
 #define HUB75_OE   21
 #define HUB75_CLK  22
- 
-//MatrixPanel_I2S_DMA dma_display;
+
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 VirtualMatrixPanel_T<PANEL_CHAIN_TYPE> *display = nullptr;
 
-uint16_t myBLACK, myWHITE, myRED, myGREEN, myBLUE;
+uint16_t time_counter = 0;
+uint16_t cycles = 0;
+uint16_t fps = 0;
+unsigned long fps_timer = 0;
 
-// Input a value 0 to 255 to get a color value.
-// The colours are a transition r - g - b - back to r.
-// From: https://gist.github.com/davidegironi/3144efdc6d67e5df55438cc3cba613c8
-uint16_t colorWheel(uint8_t pos) {
-  if(pos < 85) {
-    return display->color565(pos * 3, 255 - pos * 3, 0);
-  } else if(pos < 170) {
-    pos -= 85;
-    return display->color565(255 - pos * 3, 0, pos * 3);
-  } else {
-    pos -= 170;
-    return display->color565(0, pos * 3, 255 - pos * 3);
-  }
-}
-
-void drawText(int colorWheelOffset)
-{
-  
-  // draw text with a rotating colour
-  display->setTextSize(1);     // size 1 == 8 pixels high
-  display->setTextWrap(false); // Don't wrap at end of line - will do ourselves
-
-  display->setCursor(5, 0);    // start at top left, with 8 pixel of spacing
-  uint8_t w = 0;
-  const char *str = "ESP32 DMA";
-  for (w=0; w<strlen(str); w++) {
-    display->setTextColor(colorWheel((w*32)+colorWheelOffset));
-    display->print(str[w]);
-  }
-
-  display->println();
-  display->print(" ");
-  for (w=9; w<18; w++) {
-    display->setTextColor(colorWheel((w*32)+colorWheelOffset));
-    display->print("*");
-  }
-  
-  display->println();
-
-  display->setTextColor(display->color444(15,15,15));
-  display->println("LED MATRIX!");
-
-  // print each letter with a fixed rainbow color
-  display->setTextColor(display->color444(0,8,15));
-  display->print('6');
-  display->setTextColor(display->color444(15,4,0));
-  display->print('4');
-  display->setTextColor(display->color444(15,15,0));
-  display->print('x');
-  display->setTextColor(display->color444(8,15,0));
-  display->print('6');
-  display->setTextColor(display->color444(8,0,15));
-  display->print('4');
-
-  // Jump a half character
-  display->setCursor(34, 24);
-  display->setTextColor(display->color444(0,15,15));
-  display->print("*");
-  display->setTextColor(display->color444(15,0,0));
-  display->print('R');
-  display->setTextColor(display->color444(0,15,0));
-  display->print('G');
-  display->setTextColor(display->color444(0,0,15));
-  display->print("B");
-  display->setTextColor(display->color444(15,0,8));
-  display->println("*");
-
-}
-
+CRGB currentColor;
+CRGBPalette16 palettes[] = {
+  HeatColors_p,
+  LavaColors_p,
+  RainbowColors_p,
+  RainbowStripeColors_p,
+  CloudColors_p
+};
+CRGBPalette16 currentPalette = palettes[0];
 
 void setup() {
+  Serial.begin(115200);
+  Serial.println(F("Starting 64x64 chained-panel plasma demo"));
 
-  // Module configuration
-  HUB75_I2S_CFG mxconfig(
-    PANEL_RES_X,   // module width
-    PANEL_RES_Y,   // module height
-    PANEL_CHAIN    // Chain length
-  );
+  HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
 
-  // Do not rely on the library defaults: they differ between ESP32 variants
-  // and commonly include GPIO12, an ESP32-WROOM-32 boot-strapping pin.
   mxconfig.gpio.r1 = HUB75_R1;
   mxconfig.gpio.g1 = HUB75_G1;
   mxconfig.gpio.b1 = HUB75_B1;
@@ -136,80 +71,61 @@ void setup() {
   mxconfig.gpio.oe = HUB75_OE;
   mxconfig.gpio.clk = HUB75_CLK;
 
-  //mxconfig.clkphase = false;
-  //mxconfig.driver = HUB75_I2S_CFG::FM6126A;
-
-  // Display Setup
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
-  dma_display->begin();
-  dma_display->setBrightness8(90); //0-255
-  dma_display->clearScreen();
+  dma_display->setBrightness8(90);
 
-  // Convert the electrical 128x32 chain into a 64x64 drawing surface.
+  if (!dma_display->begin()) {
+    Serial.println(F("I2S DMA memory allocation failed"));
+    return;
+  }
+
   display = new VirtualMatrixPanel_T<PANEL_CHAIN_TYPE>(
     PANEL_ROWS, PANEL_COLS, PANEL_RES_X, PANEL_RES_Y
   );
   display->setDisplay(*dma_display);
+  display->clearScreen();
 
-  myBLACK = display->color565(0, 0, 0);
-  myWHITE = display->color565(255, 255, 255);
-  myRED = display->color565(255, 0, 0);
-  myGREEN = display->color565(0, 255, 0);
-  myBLUE = display->color565(0, 0, 255);
-  
-
-  display->fillScreen(myWHITE);
-  
-  // fix the screen with green
-  display->fillRect(0, 0, display->width(), display->height(), display->color444(0, 15, 0));
-  delay(500);
-
-  // draw a box in yellow
-  display->drawRect(0, 0, display->width(), display->height(), display->color444(15, 15, 0));
-  delay(500);
-
-  // draw an 'X' in red
-  display->drawLine(0, 0, display->width()-1, display->height()-1, display->color444(15, 0, 0));
-  display->drawLine(display->width()-1, 0, 0, display->height()-1, display->color444(15, 0, 0));
-  delay(500);
-
-  // draw a blue circle
-  display->drawCircle(10, 10, 10, display->color444(0, 0, 15));
-  delay(500);
-
-  // fill a violet circle
-  display->fillCircle(40, 21, 10, display->color444(15, 0, 15));
-  delay(500);
-
-  // fill the screen with 'black'
-  display->fillScreen(display->color444(0, 0, 0));
-
-  //drawText(0);
-
+  currentPalette = RainbowColors_p;
+  fps_timer = millis();
 }
 
-uint8_t wheelval = 0;
 void loop() {
+  if (display == nullptr) {
+    delay(1000);
+    return;
+  }
 
-    // animate by going through the colour wheel for the first two lines
-    drawText(wheelval);
-    wheelval +=1;
+  for (int16_t x = 0; x < display->width(); ++x) {
+    for (int16_t y = 0; y < display->height(); ++y) {
+      int16_t v = 128;
+      const uint8_t wibble = sin8(time_counter);
 
-    delay(20); 
-/*
-  drawText(0);
-  delay(2000);
-  dma_display->clearScreen();
-  dma_display->fillScreen(myBLACK);
-  delay(2000);
-  dma_display->fillScreen(myBLUE);
-  delay(2000);
-  dma_display->fillScreen(myRED);
-  delay(2000);
-  dma_display->fillScreen(myGREEN);
-  delay(2000);
-  dma_display->fillScreen(myWHITE);
-  dma_display->clearScreen();
-  */
-  
+      v += sin16(x * wibble * 3 + time_counter);
+      v += cos16(y * (128 - wibble) + time_counter);
+      v += sin16(y * x * cos8(-time_counter) / 8);
+
+      currentColor = ColorFromPalette(currentPalette, v >> 8);
+      display->drawPixelRGB888(
+        x, y, currentColor.r, currentColor.g, currentColor.b
+      );
+    }
+  }
+
+  ++time_counter;
+  ++cycles;
+  ++fps;
+
+  if (cycles >= 1024) {
+    time_counter = 0;
+    cycles = 0;
+    currentPalette = palettes[random(
+      sizeof(palettes) / sizeof(palettes[0])
+    )];
+  }
+
+  if (fps_timer + 5000 < millis()) {
+    Serial.printf_P(PSTR("Effect fps: %u\n"), fps / 5);
+    fps_timer = millis();
+    fps = 0;
+  }
 }
