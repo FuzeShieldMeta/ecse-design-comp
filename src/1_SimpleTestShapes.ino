@@ -79,8 +79,10 @@ struct NoteDef {
   bool variant;  // left/right for twist, half/full for pull
   bool bonus;
   uint16_t holdMs;
-  int8_t windShift;
-  int8_t visualShift;  // Authored horizontal track offset; never changed live.
+  uint8_t startColumn;
+  uint8_t endColumn;
+  uint32_t shiftStartMs;
+  uint32_t shiftEndMs;
 };
 
 struct GimmickDef {
@@ -238,49 +240,32 @@ PullState readPullState() {
   return PullState::Half;
 }
 
-void assignChartVisualShifts() {
-  // Assign fixed sub-tracks before play begins. A hold owns its complete time
-  // interval, so notes occurring during that interval receive adjacent
-  // NOTE_WIDTH-spaced tracks. Nothing is moved in response to rendered notes.
-  for (uint8_t targetLane = 0; targetLane < 3; ++targetLane) {
-    size_t group[MAX_NOTES]{};
-    size_t groupCount = 0;
-    uint32_t groupEnd = 0;
+void assignChartColumns() {
+  // Reserve one of the three real column centres for the complete duration of
+  // every hold. This is calculated once as chart data, never from live render
+  // collisions, and therefore cannot leave a note parked between columns.
+  uint32_t occupiedUntil[3] = {0, 0, 0};
+  for (size_t i = 0; i < noteCount; ++i) {
+    NoteDef &note = chart[i];
+    const uint8_t desired = note.endColumn;
+    uint8_t chosen = desired;
+    bool found = note.hitMs > occupiedUntil[chosen];
 
-    auto finishGroup = [&]() {
-      if (groupCount < 2) {
-        groupCount = 0;
-        return;
+    for (uint8_t distance = 1; !found && distance < 3; ++distance) {
+      const int left = static_cast<int>(desired) - distance;
+      const int right = static_cast<int>(desired) + distance;
+      if (left >= 0 && note.hitMs > occupiedUntil[left]) {
+        chosen = left;
+        found = true;
+      } else if (right < 3 && note.hitMs > occupiedUntil[right]) {
+        chosen = right;
+        found = true;
       }
-
-      const int laneCenter = 11 + targetLane * 20;
-      const int span = static_cast<int>(groupCount - 1) * NOTE_WIDTH;
-      int firstShift = -(span / 2);
-      // Translate the complete authored group inside the physical display.
-      const int leftEdge = laneCenter + firstShift - NOTE_WIDTH / 2;
-      const int rightEdge = laneCenter + firstShift + span + NOTE_WIDTH / 2;
-      if (leftEdge < 0) firstShift -= leftEdge;
-      if (rightEdge > 63) firstShift -= rightEdge - 63;
-
-      for (size_t position = 0; position < groupCount; ++position) {
-        chart[group[position]].visualShift =
-            firstShift + static_cast<int>(position) * NOTE_WIDTH;
-      }
-      groupCount = 0;
-    };
-
-    for (size_t i = 0; i < noteCount; ++i) {
-      const int finalLane = constrain(
-          static_cast<int>(chart[i].lane) + chart[i].windShift, 0, 2);
-      if (finalLane != targetLane) continue;
-
-      const uint32_t noteEnd = chart[i].hitMs + chart[i].holdMs;
-      if (groupCount > 0 && chart[i].hitMs > groupEnd) finishGroup();
-      if (groupCount == 0) groupEnd = noteEnd;
-      group[groupCount++] = i;
-      groupEnd = max(groupEnd, noteEnd);
     }
-    finishGroup();
+
+    if (note.shiftEndMs == 0) note.startColumn = chosen;
+    note.endColumn = chosen;
+    occupiedUntil[chosen] = note.hitMs + note.holdMs;
   }
 }
 
@@ -318,6 +303,8 @@ void buildChart() {
       static_cast<bool>(((step / 2) + selectedSong) & 1),
       static_cast<bool>(step >= totalSteps * 3 / 4),
       static_cast<uint16_t>(longHold ? stepMs * 3 : 0),
+      static_cast<uint8_t>(lane),
+      static_cast<uint8_t>(lane),
       0,
       0
     };
@@ -325,7 +312,9 @@ void buildChart() {
     if (step > 0 && step % 24 == 0 && noteCount < MAX_NOTES) {
       const Lane second = static_cast<Lane>((static_cast<uint8_t>(lane) + 1) % 3);
       chart[noteCount++] = {2000UL + step * stepMs, second,
-                            static_cast<bool>((step / 8) & 1), true, 0, 0, 0};
+                            static_cast<bool>((step / 8) & 1), true, 0,
+                            static_cast<uint8_t>(second),
+                            static_cast<uint8_t>(second), 0, 0};
     }
   }
 
@@ -349,13 +338,16 @@ void buildChart() {
     for (const GimmickDef &g : gimmicks) {
       if (upperStart < g.startMs + g.durationMs && safeEntry > g.startMs) {
         const int lane = static_cast<int>(chart[i].lane);
-        chart[i].windShift = lane == 0 ? 1 : lane == 2 ? -1 :
-                             ((i + selectedSong) & 1 ? 1 : -1);
+        const int shift = lane == 0 ? 1 : lane == 2 ? -1 :
+                          ((i + selectedSong) & 1 ? 1 : -1);
+        chart[i].endColumn = constrain(lane + shift, 0, 2);
+        chart[i].shiftStartMs = max(upperStart, g.startMs);
+        chart[i].shiftEndMs = min(safeEntry, g.startMs + g.durationMs);
         break;
       }
     }
   }
-  assignChartVisualShifts();
+  assignChartColumns();
 }
 
 float midiFrequency(int8_t note) {
@@ -1114,21 +1106,20 @@ void drawPlaying(uint32_t now) {
     } else if (y < NOTE_TOP_Y || y > 63) {
       continue;
     }
-    const int startX = laneX(chart[i].lane);
+    const int startX = laneX(static_cast<Lane>(chart[i].startColumn));
+    const int targetX = laneX(static_cast<Lane>(chart[i].endColumn));
     int x = startX;
-    if (chart[i].windShift != 0) {
-      const int targetLane = constrain(
-          static_cast<int>(chart[i].lane) + chart[i].windShift, 0, 2);
-      const int targetX = laneX(static_cast<Lane>(targetLane));
-      const float transition = constrain(
-          (y - NOTE_TOP_Y) /
-              static_cast<float>(GIMMICK_SAFE_ZONE_Y - NOTE_TOP_Y),
-          0.0f, 1.0f);
+    if (chart[i].startColumn != chart[i].endColumn &&
+        preciseTimeMs >= chart[i].shiftStartMs) {
+      const float transition = chart[i].shiftEndMs > chart[i].shiftStartMs
+          ? constrain((preciseTimeMs - chart[i].shiftStartMs) /
+                          (chart[i].shiftEndMs - chart[i].shiftStartMs),
+                      0.0f, 1.0f)
+          : 1.0f;
       const float eased = transition * transition *
                           (3.0f - 2.0f * transition);
       x = lroundf(startX + (targetX - startX) * eased);
     }
-    x += chart[i].visualShift;
 
     if (chart[i].holdMs > 0) {
       const int railTop = max(NOTE_TOP_Y, static_cast<int>(lroundf(tailY)));
