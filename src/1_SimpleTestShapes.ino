@@ -49,7 +49,10 @@
 #define SELF_TEST_CAROUSEL_CYCLES 3
 #define SELF_TEST_CAROUSEL_INTERVAL_MS 2000UL
 #define SELF_TEST_FINAL_COVER_HOLD_MS 1000UL
+#define SELF_TEST_RESULT_HOLD_MS 2000UL
+#define SELF_TEST_NEXT_COVER_HOLD_MS 1000UL
 #define DEFAULT_RENDER_INTERVAL_US 20000UL
+#define ENABLE_NOTE_SUBPIXEL_BLEND 0
 
 MatrixPanel_I2S_DMA *dmaDisplay = nullptr;
 VirtualMatrixPanel_T<PANEL_CHAIN_TYPE> *display = nullptr;
@@ -77,6 +80,7 @@ struct NoteDef {
   bool bonus;
   uint16_t holdMs;
   int8_t windShift;
+  int8_t visualShift;  // Authored horizontal track offset; never changed live.
 };
 
 struct GimmickDef {
@@ -105,10 +109,18 @@ constexpr int8_t BASSES[][16] = {
 constexpr size_t SONG_COUNT = sizeof(SONGS) / sizeof(SONGS[0]);
 constexpr size_t MAX_NOTES = 220;
 constexpr size_t GIMMICK_COUNT = 2;
-constexpr int NOTE_HIT_Y = 55;
+constexpr int NOTE_HIT_Y = 58;
 constexpr int NOTE_TOP_Y = 0;
 constexpr int GIMMICK_SAFE_ZONE_Y = 26;  // Bottom 60% begins here.
 constexpr int32_t NOTE_TRAVEL_MS = 1800;
+constexpr uint16_t POST_HIT_DISPLAY_MS = 160;
+constexpr uint16_t PERFECT_BASE_POINTS = 1000;
+constexpr uint16_t GOOD_BASE_POINTS = 650;
+constexpr uint16_t HOLD_POINTS_PER_SECOND = 900;
+constexpr int NOTE_WIDTH = 11;
+constexpr int TWIST_REQUIRED_WIDTH = 8;
+constexpr int TWIST_OTHER_WIDTH = 2;
+constexpr uint16_t HEALTH_REGEN_FLASH_MS = 350;
 constexpr int32_t SAFE_ZONE_LEAD_MS =
     NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) /
     (NOTE_HIT_Y - NOTE_TOP_Y);
@@ -117,6 +129,9 @@ NoteDef chart[MAX_NOTES]{};
 bool resolved[MAX_NOTES]{};
 bool holding[MAX_NOTES]{};
 Judgment holdStartJudgment[MAX_NOTES]{};
+uint32_t noteVisibleUntilMs[MAX_NOTES]{};
+uint32_t holdLastScoreAt[MAX_NOTES]{};
+uint32_t holdScoreAccumulator[MAX_NOTES]{};
 GimmickDef gimmicks[GIMMICK_COUNT]{};
 size_t noteCount = 0;
 uint32_t songDurationMs = 0;
@@ -177,6 +192,13 @@ uint16_t perfects = 0;
 uint16_t goods = 0;
 uint16_t misses = 0;
 int16_t health = 100;
+float healthRecoveryBank = 0.0f;
+float displayedHealth = 100.0f;
+uint32_t healthDamageAt = 0;
+uint32_t healthAnimationAt = 0;
+uint32_t healthRegenAt = 0;
+uint8_t healthRegenFromWidth = 0;
+uint8_t healthRegenToWidth = 0;
 uint8_t difficulty = 1;
 Judgment lastJudgment = Judgment::None;
 Lane lastJudgmentLane = Lane::Push;
@@ -189,6 +211,7 @@ bool audioReady = false;
 uint32_t renderIntervalUs = DEFAULT_RENDER_INTERVAL_US;
 bool startupTestActive = STARTUP_SELF_TEST;
 bool startupAutoPlay = false;
+bool startupDemoRestartPending = false;
 uint8_t startupCarouselCycles = 0;
 uint32_t startupTestChangedAt = 0;
 
@@ -213,6 +236,52 @@ PullState readPullState() {
   if (pullFull.stable) return PullState::Full;
   if (pullRest.stable) return PullState::Rest;
   return PullState::Half;
+}
+
+void assignChartVisualShifts() {
+  // Assign fixed sub-tracks before play begins. A hold owns its complete time
+  // interval, so notes occurring during that interval receive adjacent
+  // NOTE_WIDTH-spaced tracks. Nothing is moved in response to rendered notes.
+  for (uint8_t targetLane = 0; targetLane < 3; ++targetLane) {
+    size_t group[MAX_NOTES]{};
+    size_t groupCount = 0;
+    uint32_t groupEnd = 0;
+
+    auto finishGroup = [&]() {
+      if (groupCount < 2) {
+        groupCount = 0;
+        return;
+      }
+
+      const int laneCenter = 11 + targetLane * 20;
+      const int span = static_cast<int>(groupCount - 1) * NOTE_WIDTH;
+      int firstShift = -(span / 2);
+      // Translate the complete authored group inside the physical display.
+      const int leftEdge = laneCenter + firstShift - NOTE_WIDTH / 2;
+      const int rightEdge = laneCenter + firstShift + span + NOTE_WIDTH / 2;
+      if (leftEdge < 0) firstShift -= leftEdge;
+      if (rightEdge > 63) firstShift -= rightEdge - 63;
+
+      for (size_t position = 0; position < groupCount; ++position) {
+        chart[group[position]].visualShift =
+            firstShift + static_cast<int>(position) * NOTE_WIDTH;
+      }
+      groupCount = 0;
+    };
+
+    for (size_t i = 0; i < noteCount; ++i) {
+      const int finalLane = constrain(
+          static_cast<int>(chart[i].lane) + chart[i].windShift, 0, 2);
+      if (finalLane != targetLane) continue;
+
+      const uint32_t noteEnd = chart[i].hitMs + chart[i].holdMs;
+      if (groupCount > 0 && chart[i].hitMs > groupEnd) finishGroup();
+      if (groupCount == 0) groupEnd = noteEnd;
+      group[groupCount++] = i;
+      groupEnd = max(groupEnd, noteEnd);
+    }
+    finishGroup();
+  }
 }
 
 bool gimmickActive(GimmickType type, uint32_t t, float *amount = nullptr) {
@@ -249,18 +318,22 @@ void buildChart() {
       static_cast<bool>(((step / 2) + selectedSong) & 1),
       static_cast<bool>(step >= totalSteps * 3 / 4),
       static_cast<uint16_t>(longHold ? stepMs * 3 : 0),
+      0,
       0
     };
 
     if (step > 0 && step % 24 == 0 && noteCount < MAX_NOTES) {
       const Lane second = static_cast<Lane>((static_cast<uint8_t>(lane) + 1) % 3);
       chart[noteCount++] = {2000UL + step * stepMs, second,
-                            static_cast<bool>((step / 8) & 1), true, 0, 0};
+                            static_cast<bool>((step / 8) & 1), true, 0, 0, 0};
     }
   }
 
   memset(resolved, 0, sizeof(resolved));
   memset(holding, 0, sizeof(holding));
+  memset(noteVisibleUntilMs, 0, sizeof(noteVisibleUntilMs));
+  memset(holdLastScoreAt, 0, sizeof(holdLastScoreAt));
+  memset(holdScoreAccumulator, 0, sizeof(holdScoreAccumulator));
   for (Judgment &result : holdStartJudgment) result = Judgment::None;
   songDurationMs = 2000UL + totalSteps * stepMs;
   gimmicks[0] = {songDurationMs / 3,     2800, GimmickType::WindGust, 1.0f};
@@ -282,6 +355,7 @@ void buildChart() {
       }
     }
   }
+  assignChartVisualShifts();
 }
 
 float midiFrequency(int8_t note) {
@@ -410,6 +484,12 @@ void startRun(uint32_t now) {
   score = 0;
   combo = maxCombo = perfects = goods = misses = 0;
   health = 100;
+  healthRecoveryBank = 0.0f;
+  displayedHealth = 100.0f;
+  healthDamageAt = 0;
+  healthAnimationAt = now;
+  healthRegenAt = 0;
+  healthRegenFromWidth = healthRegenToWidth = 60;
   difficulty = SONGS[selectedSong].difficulty;
   lastJudgment = Judgment::None;
   for (uint8_t lane = 0; lane < 3; ++lane) {
@@ -420,6 +500,35 @@ void startRun(uint32_t now) {
   runStartedAt = now;
   runStartedAtUs = micros();
   screen = Screen::Playing;
+}
+
+uint8_t scoreMultiplier() {
+  return 1 + min<uint16_t>(combo / 10, 4);
+}
+
+void awardRawScore(uint32_t rawPoints, bool bonus) {
+  score += rawPoints * scoreMultiplier() * (bonus ? 2 : 1);
+}
+
+void scoreHoldFrame(size_t index, uint32_t t) {
+  const NoteDef &note = chart[index];
+  const uint32_t holdEnd = note.hitMs + note.holdMs;
+  const uint32_t scoreTo = min(t, holdEnd);
+  if (holdLastScoreAt[index] == 0)
+    holdLastScoreAt[index] = max(t, note.hitMs);
+  if (scoreTo <= holdLastScoreAt[index]) return;
+
+  const uint32_t elapsed = scoreTo - holdLastScoreAt[index];
+  holdLastScoreAt[index] = scoreTo;
+  const uint8_t accuracyPercent =
+      holdStartJudgment[index] == Judgment::Perfect ? 100 : 65;
+  // Accumulate thousandths of time-scaled raw points so scoring remains
+  // independent of the actual frame interval.
+  holdScoreAccumulator[index] +=
+      elapsed * HOLD_POINTS_PER_SECOND * accuracyPercent;
+  const uint32_t rawPoints = holdScoreAccumulator[index] / 100000UL;
+  holdScoreAccumulator[index] %= 100000UL;
+  if (rawPoints > 0) awardRawScore(rawPoints, note.bonus);
 }
 
 void judge(Judgment result, Lane lane, bool bonus = false) {
@@ -433,19 +542,43 @@ void judge(Judgment result, Lane lane, bool bonus = false) {
     ++misses;
     combo = 0;
     health -= 12;
+    healthDamageAt = judgmentShownAt;
+    healthAnimationAt = judgmentShownAt;
   } else {
+    const int16_t healthBefore = health;
     ++combo;
     maxCombo = max(maxCombo, combo);
     if (result == Judgment::Perfect) {
       ++perfects;
-      health += 3;
+      healthRecoveryBank += 0.50f;
     } else {
       ++goods;
-      health += 1;
+      healthRecoveryBank += 0.25f;
+    }
+    if (health >= 100) {
+      // Do not bank regeneration while already full for use after a later miss.
+      healthRecoveryBank = 0.0f;
+    } else {
+      while (healthRecoveryBank >= 1.0f && health < 100) {
+        ++health;
+        healthRecoveryBank -= 1.0f;
+      }
+      if (health >= 100) healthRecoveryBank = 0.0f;
     }
     health = min<int16_t>(health, 100);
-    const uint32_t base = result == Judgment::Perfect ? 1000 : 500;
-    score += base * (1 + min<uint16_t>(combo / 10, 4)) * (bonus ? 2 : 1);
+    if (health > healthBefore) {
+      const uint8_t previousWidth = constrain(healthBefore * 60 / 100, 0, 60);
+      const uint8_t regeneratedWidth = constrain(health * 60 / 100, 0, 60);
+      if (regeneratedWidth > previousWidth) {
+        healthRegenFromWidth = previousWidth;
+        healthRegenToWidth = regeneratedWidth;
+        healthRegenAt = judgmentShownAt;
+      }
+    }
+    displayedHealth = max(displayedHealth, static_cast<float>(health));
+    const uint32_t base = result == Judgment::Perfect
+                              ? PERFECT_BASE_POINTS : GOOD_BASE_POINTS;
+    awardRawScore(base, bonus);
   }
 
   if (health <= 0) {
@@ -468,7 +601,7 @@ void updateStartupSelfTest(uint32_t now) {
     return;
   }
 
-  // Let the fifth slide settle so its final cover is visible before entering.
+  // Let the final slide settle so its cover is visible before entering.
   if (now - startupTestChangedAt >= SELF_TEST_FINAL_COVER_HOLD_MS) {
     startupTestActive = false;
     startupAutoPlay = true;
@@ -491,13 +624,25 @@ void updateStartupAutoPlay(uint32_t t) {
     // Hold notes are completed perfectly so their full tails remain visible.
     if (chart[i].holdMs > 0 && t < chart[i].hitMs + chart[i].holdMs) {
       if (t < chart[i].hitMs) continue;
+      if (!holding[i]) {
+        holdLastScoreAt[i] = chart[i].hitMs;
+        holdScoreAccumulator[i] = 0;
+      }
       holding[i] = true;
       holdStartJudgment[i] = Judgment::Perfect;
+      scoreHoldFrame(i, t);
       continue;
     }
     if (chart[i].holdMs > 0) {
+      if (holdStartJudgment[i] == Judgment::None) {
+        holdStartJudgment[i] = Judgment::Perfect;
+        holdLastScoreAt[i] = chart[i].hitMs;
+      }
+      scoreHoldFrame(i, t);
       holding[i] = false;
       resolved[i] = true;
+      noteVisibleUntilMs[i] = chart[i].hitMs + chart[i].holdMs +
+                              POST_HIT_DISPLAY_MS;
       judge(Judgment::Perfect, chart[i].lane, chart[i].bonus);
       continue;
     }
@@ -513,8 +658,33 @@ void updateStartupAutoPlay(uint32_t t) {
 
     holding[i] = false;
     resolved[i] = true;
+    noteVisibleUntilMs[i] = chart[i].hitMs + POST_HIT_DISPLAY_MS;
     judge(goodExample ? Judgment::Good : Judgment::Perfect,
           chart[i].lane, chart[i].bonus);
+  }
+}
+
+void updateRepeatingDemo(uint32_t now) {
+  if (!startupAutoPlay) return;
+
+  if (screen == Screen::Results || screen == Screen::Failed) {
+    if (now - endShownAt < SELF_TEST_RESULT_HOLD_MS) return;
+
+    // Advance exactly one cover between demo runs. Leave the select screen
+    // visible while the carousel slide settles before starting the next song.
+    selectedSong = (selectedSong + 1) % SONG_COUNT;
+    carouselSlide = 1;
+    carouselChangedAt = now;
+    startupTestChangedAt = now;
+    startupDemoRestartPending = true;
+    screen = Screen::Select;
+    return;
+  }
+
+  if (screen == Screen::Select && startupDemoRestartPending &&
+      now - startupTestChangedAt >= SELF_TEST_NEXT_COVER_HOLD_MS) {
+    startupDemoRestartPending = false;
+    startRun(now);
   }
 }
 
@@ -556,8 +726,11 @@ void handleAction(Lane physicalLane, Gesture gesture, uint32_t t) {
   if (chart[best].holdMs > 0) {
     holding[best] = true;
     holdStartJudgment[best] = timing;
+    holdLastScoreAt[best] = max(t, chart[best].hitMs);
+    holdScoreAccumulator[best] = 0;
   } else {
     resolved[best] = true;
+    noteVisibleUntilMs[best] = chart[best].hitMs + POST_HIT_DISPLAY_MS;
     judge(timing, chart[best].lane, chart[best].bonus);
   }
 }
@@ -575,14 +748,19 @@ void updateHolds(uint32_t t) {
   if (startupAutoPlay) return;
   for (size_t i = 0; i < noteCount && screen == Screen::Playing; ++i) {
     if (!holding[i] || resolved[i]) continue;
-    if (!requiredHoldActive(chart[i])) {
+    if (t >= chart[i].hitMs + chart[i].holdMs) {
+      scoreHoldFrame(i, t);
+      holding[i] = false;
+      resolved[i] = true;
+      noteVisibleUntilMs[i] = chart[i].hitMs + chart[i].holdMs +
+                              POST_HIT_DISPLAY_MS;
+      judge(holdStartJudgment[i], chart[i].lane, chart[i].bonus);
+    } else if (!requiredHoldActive(chart[i])) {
       holding[i] = false;
       resolved[i] = true;
       judge(Judgment::Miss, chart[i].lane);
-    } else if (t >= chart[i].hitMs + chart[i].holdMs) {
-      holding[i] = false;
-      resolved[i] = true;
-      judge(holdStartJudgment[i], chart[i].lane, chart[i].bonus);
+    } else {
+      scoreHoldFrame(i, t);
     }
   }
 }
@@ -605,8 +783,8 @@ void updateInputs(uint32_t now) {
 
   if (screen == Screen::Select) {
     // Physical selection is deliberately locked during the deterministic
-    // startup carousel test. Controls become active as soon as it finishes.
-    if (startupTestActive) return;
+    // carousel test and its repeating autoplay song transitions.
+    if (startupTestActive || startupAutoPlay) return;
     if (twistLeft.pressedEdge) {
       selectedSong = (selectedSong + SONG_COUNT - 1) % SONG_COUNT;
       carouselSlide = -1;
@@ -753,6 +931,10 @@ void drawSelect(uint32_t now) {
 
   display->fillTriangle(1, 22, 5, 18, 5, 26, rgb(255, 255, 255));
   display->fillTriangle(62, 22, 58, 18, 58, 26, rgb(255, 255, 255));
+  const uint16_t arrowBorder = ((now / 250) & 1)
+      ? rgb(0, 210, 255) : rgb(0, 45, 150);
+  display->drawTriangle(1, 22, 5, 18, 5, 26, arrowBorder);
+  display->drawTriangle(62, 22, 58, 18, 58, 26, arrowBorder);
   centeredSmallText(SONGS[selectedSong].title, 38, rgb(255, 255, 255));
   char detail[16];
   snprintf(detail, sizeof(detail), "%u BPM  D%u", SONGS[selectedSong].bpm,
@@ -799,7 +981,27 @@ void drawTwistRow(int x, int y, int width, bool requiredSide,
   display->drawFastHLine(x, y, width, color);
 }
 
+uint16_t twistSplitColor(bool requiredSide, float brightness) {
+  brightness *= requiredSide ? 1.0f : 0.25f;
+  return requiredSide
+      ? rgb(0, static_cast<uint8_t>(255 * brightness), 0)
+      : rgb(static_cast<uint8_t>(255 * brightness), 0, 0);
+}
+
+void twistSegmentGeometry(int centerX, bool turnRight,
+                          int &requiredX, int &otherX) {
+  const int leftEdge = centerX - NOTE_WIDTH / 2;
+  if (turnRight) {
+    otherX = leftEdge;
+    requiredX = leftEdge + TWIST_OTHER_WIDTH + 1;
+  } else {
+    requiredX = leftEdge;
+    otherX = leftEdge + TWIST_REQUIRED_WIDTH + 1;
+  }
+}
+
 void drawNote(const NoteDef &note, int x, float y) {
+#if ENABLE_NOTE_SUBPIXEL_BLEND
   const int baseY = floorf(y);
   const float fraction = y - baseY;
   // Frame-aware directional interpolation. Look slightly ahead by a fraction
@@ -812,25 +1014,43 @@ void drawNote(const NoteDef &note, int x, float y) {
       fraction + pixelsPerFrame * 0.35f, 0.0f, 1.0f);
   const float lowerBlend = sqrtf(forwardPosition);
   const float upperBlend = powf(1.0f - forwardPosition, 1.35f);
+  const float forwardGlow = lowerBlend * min(0.06f, pixelsPerFrame * 0.12f);
+  const float backwardGlow = upperBlend * min(0.015f, pixelsPerFrame * 0.025f);
+#else
+  // Temporary diagnostic mode: snap notes to whole rows with no fractional
+  // brightness transfer, leading glow, or trailing glow.
+  const int baseY = lroundf(y);
+  const float lowerBlend = 0.0f;
+  const float upperBlend = 1.0f;
+  const float forwardGlow = 0.0f;
+  const float backwardGlow = 0.0f;
+#endif
 
   // The two-pixel bar is blended across adjacent rows according to its
   // fractional vertical position, producing smoother apparent movement.
   if (note.lane != Lane::Twist) {
-    drawInterpolatedRow(x - 5, baseY - 1, 10, note.lane, upperBlend);
-    drawInterpolatedRow(x - 5, baseY, 10, note.lane, 1.0f);
-    drawInterpolatedRow(x - 5, baseY + 1, 10, note.lane, lowerBlend);
+    drawInterpolatedRow(x - 5, baseY - 2, NOTE_WIDTH, note.lane, backwardGlow);
+    drawInterpolatedRow(x - 5, baseY - 1, NOTE_WIDTH, note.lane, upperBlend);
+    drawInterpolatedRow(x - 5, baseY, NOTE_WIDTH, note.lane, 1.0f);
+    drawInterpolatedRow(x - 5, baseY + 1, NOTE_WIDTH, note.lane, lowerBlend);
+    drawInterpolatedRow(x - 5, baseY + 2, NOTE_WIDTH, note.lane, forwardGlow);
     return;
   }
 
-  // Both twist halves have identical geometry. The requested turn side is
-  // bright green; the other half stays dim red. variant=true means right.
-  const int requiredX = note.variant ? x : x - 5;
-  const int otherX = note.variant ? x - 5 : x;
-  for (int rowOffset = -1; rowOffset <= 1; ++rowOffset) {
-    const float coverage = rowOffset == -1 ? upperBlend :
-                           rowOffset == 0 ? 1.0f : lowerBlend;
-    drawTwistRow(requiredX, baseY + rowOffset, 5, true, coverage);
-    drawTwistRow(otherX, baseY + rowOffset, 5, false, coverage);
+  // The requested turn occupies eight of the note's eleven pixels. The other
+  // direction remains a two-pixel dim-red cue, separated by one dark pixel.
+  int requiredX = 0;
+  int otherX = 0;
+  twistSegmentGeometry(x, note.variant, requiredX, otherX);
+  for (int rowOffset = -2; rowOffset <= 2; ++rowOffset) {
+    const float coverage = rowOffset == -2 ? backwardGlow :
+                           rowOffset == -1 ? upperBlend :
+                           rowOffset == 0 ? 1.0f :
+                           rowOffset == 1 ? lowerBlend : forwardGlow;
+    drawTwistRow(requiredX, baseY + rowOffset,
+                 TWIST_REQUIRED_WIDTH, true, coverage);
+    drawTwistRow(otherX, baseY + rowOffset,
+                 TWIST_OTHER_WIDTH, false, coverage);
   }
 }
 
@@ -855,42 +1075,45 @@ void drawPlaying(uint32_t now) {
   display->fillScreen(0);
   // Extend the two internal column separators to the top edge.
   for (int x : {21, 41})
-    display->drawFastVLine(x, 0, 57, rgb(45, 45, 45));
-  display->drawFastHLine(2, 0, health * 60 / 100,
-                         health > 30 ? rgb(0, 255, 100)
-                                     : rgb(255, 30, 20));
+    display->drawFastVLine(x, 0, NOTE_HIT_Y + 1, rgb(45, 45, 45));
 
   drawGimmickEffect(now, t);
 
   // Draw the lane-specific timing segments before notes so approaching notes
-  // remain visible as they cross the line. White=idle, green=perfect,
-  // amber=good, and red=miss.
+  // remain visible as they cross the line. These colours deliberately avoid
+  // the red, green, and blue note palette: white=idle, yellow=perfect,
+  // magenta=good, and orange=miss.
   for (uint8_t laneIndex = 0; laneIndex < 3; ++laneIndex) {
     uint16_t barColor = rgb(255, 255, 255);
     const Judgment result = laneJudgments[laneIndex];
     if (result != Judgment::None &&
         now - laneJudgmentShownAt[laneIndex] < 300) {
-      barColor = result == Judgment::Perfect ? rgb(0, 255, 70) :
-                 result == Judgment::Good ? rgb(255, 180, 0) :
-                                            rgb(255, 0, 0);
+      barColor = result == Judgment::Perfect ? rgb(255, 255, 0) :
+                 result == Judgment::Good ? rgb(255, 0, 255) :
+                                            rgb(255, 80, 0);
     }
     display->drawFastHLine(2 + laneIndex * 20, NOTE_HIT_Y, 20, barColor);
   }
 
-  int drawnX[24]{};
-  int drawnY[24]{};
-  uint8_t drawnCount = 0;
-  constexpr int collisionOffsets[] = {0, -10, 10, -20, 20, -30, 30};
-
   for (size_t i = 0; i < noteCount; ++i) {
-    if (resolved[i]) continue;
+    const bool lingering = resolved[i] && noteVisibleUntilMs[i] > 0 &&
+                           preciseTimeMs <= noteVisibleUntilMs[i];
+    if (resolved[i] && !lingering) continue;
     const float until = chart[i].hitMs - preciseTimeMs;
-    if (until < -200 || until > NOTE_TRAVEL_MS) continue;
+    const float visibleAfterHit = chart[i].holdMs + POST_HIT_DISPLAY_MS;
+    if (until < -visibleAfterHit || until > NOTE_TRAVEL_MS) continue;
     const float y = NOTE_HIT_Y -
         until * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) / NOTE_TRAVEL_MS;
-    if (y < NOTE_TOP_Y || y > 61) continue;
-    const int collisionY = lroundf(y);
-
+    float tailY = y;
+    if (chart[i].holdMs > 0) {
+      const float tailUntil = chart[i].hitMs + chart[i].holdMs - preciseTimeMs;
+      tailY = NOTE_HIT_Y -
+          tailUntil * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) /
+          NOTE_TRAVEL_MS;
+      if (y < NOTE_TOP_Y || tailY > 63) continue;
+    } else if (y < NOTE_TOP_Y || y > 63) {
+      continue;
+    }
     const int startX = laneX(chart[i].lane);
     int x = startX;
     if (chart[i].windShift != 0) {
@@ -905,57 +1128,71 @@ void drawPlaying(uint32_t now) {
                           (3.0f - 2.0f * transition);
       x = lroundf(startX + (targetX - startX) * eased);
     }
-
-    // Find a nearby non-overlapping horizontal slot. With 10x2 bars and a
-    // dim antialiasing edge, centres need 10 horizontal or 3 vertical pixels.
-    const int desiredX = x;
-    bool placed = false;
-    for (int offset : collisionOffsets) {
-      const int candidateX = desiredX + offset;
-      if (candidateX < 6 || candidateX > 58) continue;
-      bool collision = false;
-      for (uint8_t n = 0; n < drawnCount; ++n) {
-        if (abs(candidateX - drawnX[n]) < 10 &&
-            abs(collisionY - drawnY[n]) < 3) {
-          collision = true;
-          break;
-        }
-      }
-      if (!collision) {
-        x = candidateX;
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) continue;
+    x += chart[i].visualShift;
 
     if (chart[i].holdMs > 0) {
-      const float tailUntil = chart[i].hitMs + chart[i].holdMs - preciseTimeMs;
-      const float tailY = NOTE_HIT_Y -
-          tailUntil * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) /
-          NOTE_TRAVEL_MS;
       const int railTop = max(NOTE_TOP_Y, static_cast<int>(lroundf(tailY)));
-      const int railBottom = min(61, static_cast<int>(lroundf(y)));
+      const int railBottom = min(63, static_cast<int>(lroundf(y)));
       if (railBottom >= railTop) {
-        const uint16_t railColor = noteColor(chart[i].lane, 0.30f);
-        display->drawFastVLine(x - 5, railTop,
-                               railBottom - railTop + 1, railColor);
-        display->drawFastVLine(x + 4, railTop,
-                               railBottom - railTop + 1, railColor);
+        const int trailHeight = railBottom - railTop + 1;
+        if (chart[i].lane == Lane::Twist) {
+          int requiredX = 0;
+          int otherX = 0;
+          twistSegmentGeometry(x, chart[i].variant, requiredX, otherX);
+          display->fillRect(requiredX, railTop, TWIST_REQUIRED_WIDTH,
+                            trailHeight, twistSplitColor(true, 1.0f));
+          display->fillRect(otherX, railTop, TWIST_OTHER_WIDTH,
+                            trailHeight, twistSplitColor(false, 1.0f));
+        } else {
+          const uint16_t trailColor = noteColor(chart[i].lane, 1.0f);
+          display->fillRect(x - 5, railTop, NOTE_WIDTH,
+                            trailHeight, trailColor);
+        }
       }
     }
-    drawNote(chart[i], x, y);
-    if (drawnCount < sizeof(drawnX) / sizeof(drawnX[0])) {
-      drawnX[drawnCount] = x;
-      drawnY[drawnCount] = collisionY;
-      ++drawnCount;
+    if (y <= 63) drawNote(chart[i], x, y);
+  }
+
+  // Mask row zero after all playfield rendering, then draw health as the
+  // foreground UI. Notes and hold trails can never cover or replace it.
+  display->drawFastHLine(0, 0, 64, 0);
+  const uint32_t healthFrameMs = now - healthAnimationAt;
+  healthAnimationAt = now;
+  if (displayedHealth < health) {
+    displayedHealth = health;
+  } else if (displayedHealth > health && now - healthDamageAt >= 450) {
+    displayedHealth = max(static_cast<float>(health),
+                          displayedHealth - healthFrameMs * 0.018f);
+  }
+  const int healthyWidth = constrain(health * 60 / 100, 0, 60);
+  const int displayedWidth = constrain(
+      static_cast<int>(lroundf(displayedHealth * 60.0f / 100.0f)), 0, 60);
+  display->drawFastHLine(2, 0, healthyWidth,
+                         health > 30 ? rgb(0, 255, 100)
+                                     : rgb(255, 30, 20));
+  if (healthRegenToWidth > healthRegenFromWidth &&
+      now - healthRegenAt < HEALTH_REGEN_FLASH_MS) {
+    display->drawFastHLine(2 + healthRegenFromWidth, 0,
+                           healthRegenToWidth - healthRegenFromWidth,
+                           rgb(0, 255, 0));
+  }
+  if (displayedWidth > healthyWidth) {
+    const uint32_t damageAge = now - healthDamageAt;
+    const bool flashVisible = damageAge >= 450 || ((damageAge / 75) & 1) == 0;
+    if (flashVisible) {
+      display->drawFastHLine(2 + healthyWidth, 0,
+                             displayedWidth - healthyWidth,
+                             damageAge < 450 ? rgb(255, 0, 0)
+                                             : rgb(130, 0, 0));
     }
   }
 
+  display->setFont(&Picopixel);
   display->setTextSize(1);
   display->setTextColor(rgb(255, 255, 255));
-  display->setCursor(3, 57);
-  display->printf("%u", combo);
+  display->setCursor(2, 63);
+  display->printf("%lu", static_cast<unsigned long>(score));
+  display->setFont(nullptr);
 
   if (readPullState() == PullState::Fault)
     centeredText("PULL FAULT", 17, rgb(255, 20, 20));
@@ -965,10 +1202,12 @@ void drawEnd(bool failed) {
   display->fillScreen(0);
   centeredText(failed ? "GAME OVER" : "RESULT", 5,
                failed ? rgb(255, 30, 30) : rgb(0, 255, 255));
+  char scoreText[24];
+  snprintf(scoreText, sizeof(scoreText), "SCORE %lu",
+           static_cast<unsigned long>(score));
+  centeredSmallText(scoreText, 18, rgb(255, 255, 255));
   display->setTextSize(1);
   display->setTextColor(rgb(255, 255, 255));
-  display->setCursor(4, 18);
-  display->printf("SCORE %lu", static_cast<unsigned long>(score));
   display->setCursor(4, 28);
   display->printf("P%u G%u M%u", perfects, goods, misses);
   display->setCursor(4, 38);
@@ -1092,6 +1331,7 @@ void loop() {
     updateHolds(t);
     expireMisses(t);
   }
+  updateRepeatingDemo(now);
 
   static uint32_t lastFrameUs = 0;
   const uint32_t frameNowUs = micros();
