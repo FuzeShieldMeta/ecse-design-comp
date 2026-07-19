@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <ESP32-HUB75-VirtualMatrixPanel_T.hpp>
+#include <Fonts/Picopixel.h>
 #include <driver/i2s.h>
 
 // BOP Rhythm: two 64x32 HUB75 panels presented as one 64x64 display.
@@ -45,8 +46,8 @@
 // Boot demonstration used while testing the assembled hardware. Set to 0 to
 // restore normal manual song selection immediately after startup.
 #define STARTUP_SELF_TEST 1
-#define SELF_TEST_CAROUSEL_CYCLES 5
-#define SELF_TEST_CAROUSEL_INTERVAL_MS 3000UL
+#define SELF_TEST_CAROUSEL_CYCLES 3
+#define SELF_TEST_CAROUSEL_INTERVAL_MS 2000UL
 #define SELF_TEST_FINAL_COVER_HOLD_MS 1000UL
 #define DEFAULT_RENDER_INTERVAL_US 20000UL
 
@@ -74,6 +75,8 @@ struct NoteDef {
   Lane lane;
   bool variant;  // left/right for twist, half/full for pull
   bool bonus;
+  uint16_t holdMs;
+  int8_t windShift;
 };
 
 struct GimmickDef {
@@ -103,12 +106,17 @@ constexpr size_t SONG_COUNT = sizeof(SONGS) / sizeof(SONGS[0]);
 constexpr size_t MAX_NOTES = 220;
 constexpr size_t GIMMICK_COUNT = 2;
 constexpr int NOTE_HIT_Y = 55;
-constexpr int NOTE_TOP_Y = 6;
+constexpr int NOTE_TOP_Y = 0;
 constexpr int GIMMICK_SAFE_ZONE_Y = 26;  // Bottom 60% begins here.
 constexpr int32_t NOTE_TRAVEL_MS = 1800;
+constexpr int32_t SAFE_ZONE_LEAD_MS =
+    NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) /
+    (NOTE_HIT_Y - NOTE_TOP_Y);
 
 NoteDef chart[MAX_NOTES]{};
 bool resolved[MAX_NOTES]{};
+bool holding[MAX_NOTES]{};
+Judgment holdStartJudgment[MAX_NOTES]{};
 GimmickDef gimmicks[GIMMICK_COUNT]{};
 size_t noteCount = 0;
 uint32_t songDurationMs = 0;
@@ -173,6 +181,10 @@ uint8_t difficulty = 1;
 Judgment lastJudgment = Judgment::None;
 Lane lastJudgmentLane = Lane::Push;
 uint32_t judgmentShownAt = 0;
+Judgment laneJudgments[3] = {
+  Judgment::None, Judgment::None, Judgment::None
+};
+uint32_t laneJudgmentShownAt[3]{};
 bool audioReady = false;
 uint32_t renderIntervalUs = DEFAULT_RENDER_INTERVAL_US;
 bool startupTestActive = STARTUP_SELF_TEST;
@@ -218,27 +230,58 @@ void buildChart() {
   const uint32_t stepMs = 60000UL / song.bpm / 4;
   const uint16_t totalSteps = song.bars * 16;
   noteCount = 0;
+  uint8_t twistNoteNumber = 0;
+  uint8_t pullNoteNumber = 0;
 
   for (uint16_t step = 0; step < totalSteps && noteCount < MAX_NOTES; step += 2) {
     const Lane lane = static_cast<Lane>((step / 2 + step / 16 + selectedSong) % 3);
+    bool longHold = false;
+    if (lane == Lane::Twist) {
+      ++twistNoteNumber;
+      longHold = twistNoteNumber % 6 == 4;
+    } else if (lane == Lane::Pull) {
+      ++pullNoteNumber;
+      longHold = pullNoteNumber % 6 == 4;
+    }
     chart[noteCount++] = {
       2000UL + step * stepMs,
       lane,
       static_cast<bool>(((step / 2) + selectedSong) & 1),
-      static_cast<bool>(step >= totalSteps * 3 / 4)
+      static_cast<bool>(step >= totalSteps * 3 / 4),
+      static_cast<uint16_t>(longHold ? stepMs * 3 : 0),
+      0
     };
 
     if (step > 0 && step % 24 == 0 && noteCount < MAX_NOTES) {
       const Lane second = static_cast<Lane>((static_cast<uint8_t>(lane) + 1) % 3);
       chart[noteCount++] = {2000UL + step * stepMs, second,
-                            static_cast<bool>((step / 8) & 1), true};
+                            static_cast<bool>((step / 8) & 1), true, 0, 0};
     }
   }
 
   memset(resolved, 0, sizeof(resolved));
+  memset(holding, 0, sizeof(holding));
+  for (Judgment &result : holdStartJudgment) result = Judgment::None;
   songDurationMs = 2000UL + totalSteps * stepMs;
   gimmicks[0] = {songDurationMs / 3,     2800, GimmickType::WindGust, 1.0f};
   gimmicks[1] = {songDurationMs * 2 / 3, 2800, GimmickType::WindGust, 1.0f};
+
+  // Preselect notes whose upper-screen approach intersects a gust. They move
+  // into a neighboring column before the protected bottom zone and stay there.
+  for (size_t i = 0; i < noteCount; ++i) {
+    const uint32_t upperStart = chart[i].hitMs > NOTE_TRAVEL_MS
+                                    ? chart[i].hitMs - NOTE_TRAVEL_MS : 0;
+    const uint32_t safeEntry = chart[i].hitMs > SAFE_ZONE_LEAD_MS
+                                   ? chart[i].hitMs - SAFE_ZONE_LEAD_MS : 0;
+    for (const GimmickDef &g : gimmicks) {
+      if (upperStart < g.startMs + g.durationMs && safeEntry > g.startMs) {
+        const int lane = static_cast<int>(chart[i].lane);
+        chart[i].windShift = lane == 0 ? 1 : lane == 2 ? -1 :
+                             ((i + selectedSong) & 1 ? 1 : -1);
+        break;
+      }
+    }
+  }
 }
 
 float midiFrequency(int8_t note) {
@@ -369,6 +412,10 @@ void startRun(uint32_t now) {
   health = 100;
   difficulty = SONGS[selectedSong].difficulty;
   lastJudgment = Judgment::None;
+  for (uint8_t lane = 0; lane < 3; ++lane) {
+    laneJudgments[lane] = Judgment::None;
+    laneJudgmentShownAt[lane] = 0;
+  }
   previousPullState = readPullState();
   runStartedAt = now;
   runStartedAtUs = micros();
@@ -379,6 +426,9 @@ void judge(Judgment result, Lane lane, bool bonus = false) {
   lastJudgment = result;
   lastJudgmentLane = lane;
   judgmentShownAt = millis();
+  const uint8_t laneIndex = static_cast<uint8_t>(lane);
+  laneJudgments[laneIndex] = result;
+  laneJudgmentShownAt[laneIndex] = judgmentShownAt;
   if (result == Judgment::Miss) {
     ++misses;
     combo = 0;
@@ -434,12 +484,37 @@ void updateStartupAutoPlay(uint32_t t) {
   }
 
   // Resolve notes at their target timestamps so the unattended display test
-  // exercises a complete song instead of failing after the first few notes.
+  // exercises Perfect, Good, and Miss feedback as well as sustained notes.
   for (size_t i = 0; i < noteCount; ++i) {
-    if (!resolved[i] && t >= chart[i].hitMs) {
+    if (resolved[i]) continue;
+
+    // Hold notes are completed perfectly so their full tails remain visible.
+    if (chart[i].holdMs > 0 && t < chart[i].hitMs + chart[i].holdMs) {
+      if (t < chart[i].hitMs) continue;
+      holding[i] = true;
+      holdStartJudgment[i] = Judgment::Perfect;
+      continue;
+    }
+    if (chart[i].holdMs > 0) {
+      holding[i] = false;
       resolved[i] = true;
       judge(Judgment::Perfect, chart[i].lane, chart[i].bonus);
+      continue;
     }
+
+    const uint8_t example = i % 12;
+    // Example 2 intentionally passes the full window and is expired as a miss
+    // by expireMisses(). The wider spacing lets the full demo song complete.
+    if (example == 2) continue;
+    const bool goodExample = example == 1 || example == 5 || example == 9;
+    const uint32_t demonstrationTime = chart[i].hitMs +
+        (goodExample ? perfectWindow() + 10 : 0);
+    if (t < demonstrationTime) continue;
+
+    holding[i] = false;
+    resolved[i] = true;
+    judge(goodExample ? Judgment::Good : Judgment::Perfect,
+          chart[i].lane, chart[i].bonus);
   }
 }
 
@@ -471,13 +546,45 @@ void handleAction(Lane physicalLane, Gesture gesture, uint32_t t) {
     return;
   }
 
-  resolved[best] = true;
   if (requiredGesture(chart[best], physicalLane) != gesture) {
+    resolved[best] = true;
     judge(Judgment::Miss, chart[best].lane);
     return;
   }
-  judge(bestDelta <= perfectWindow() ? Judgment::Perfect : Judgment::Good,
-        chart[best].lane, chart[best].bonus);
+  const Judgment timing = bestDelta <= perfectWindow()
+                              ? Judgment::Perfect : Judgment::Good;
+  if (chart[best].holdMs > 0) {
+    holding[best] = true;
+    holdStartJudgment[best] = timing;
+  } else {
+    resolved[best] = true;
+    judge(timing, chart[best].lane, chart[best].bonus);
+  }
+}
+
+bool requiredHoldActive(const NoteDef &note) {
+  if (note.lane == Lane::Twist)
+    return note.variant ? twistRight.stable : twistLeft.stable;
+  if (note.lane == Lane::Pull)
+    return note.variant ? readPullState() == PullState::Full
+                        : readPullState() == PullState::Half;
+  return pushInput.stable;
+}
+
+void updateHolds(uint32_t t) {
+  if (startupAutoPlay) return;
+  for (size_t i = 0; i < noteCount && screen == Screen::Playing; ++i) {
+    if (!holding[i] || resolved[i]) continue;
+    if (!requiredHoldActive(chart[i])) {
+      holding[i] = false;
+      resolved[i] = true;
+      judge(Judgment::Miss, chart[i].lane);
+    } else if (t >= chart[i].hitMs + chart[i].holdMs) {
+      holding[i] = false;
+      resolved[i] = true;
+      judge(holdStartJudgment[i], chart[i].lane, chart[i].bonus);
+    }
+  }
 }
 
 void updateInputs(uint32_t now) {
@@ -556,7 +663,7 @@ void updateInputs(uint32_t now) {
 
 void expireMisses(uint32_t t) {
   for (size_t i = 0; i < noteCount && screen == Screen::Playing; ++i) {
-    if (!resolved[i] && t > chart[i].hitMs + goodWindow()) {
+    if (!resolved[i] && !holding[i] && t > chart[i].hitMs + goodWindow()) {
       resolved[i] = true;
       judge(Judgment::Miss, chart[i].lane);
     }
@@ -573,6 +680,19 @@ void centeredText(const char *text, int y, uint16_t color) {
   display->setTextColor(color);
   display->setCursor(max(0, (64 - static_cast<int>(strlen(text)) * 6) / 2), y);
   display->print(text);
+}
+
+void centeredSmallText(const char *text, int top, uint16_t color) {
+  display->setFont(&Picopixel);
+  display->setTextSize(1);
+  display->setTextWrap(false);
+  display->setTextColor(color);
+  int16_t x1, y1;
+  uint16_t width, height;
+  display->getTextBounds(text, 0, 0, &x1, &y1, &width, &height);
+  display->setCursor((64 - static_cast<int>(width)) / 2 - x1, top - y1);
+  display->print(text);
+  display->setFont(nullptr);
 }
 
 void drawCoverArt(uint8_t index, int x, int y, int size, bool focused) {
@@ -611,7 +731,7 @@ void drawCoverArt(uint8_t index, int x, int y, int size, bool focused) {
 void drawSelect(uint32_t now) {
   // Start from true black so every pixel not explicitly used is fully off.
   display->fillScreen(0);
-  centeredText("SONG SELECT", 0, rgb(0, 255, 255));
+  centeredSmallText("SONG SELECT", 0, rgb(0, 255, 255));
 
   const uint32_t elapsed = now - carouselChangedAt;
   const float progress = elapsed >= 240 ? 1.0f : elapsed / 240.0f;
@@ -633,12 +753,12 @@ void drawSelect(uint32_t now) {
 
   display->fillTriangle(1, 22, 5, 18, 5, 26, rgb(255, 255, 255));
   display->fillTriangle(62, 22, 58, 18, 58, 26, rgb(255, 255, 255));
-  centeredText(SONGS[selectedSong].title, 38, rgb(255, 255, 255));
+  centeredSmallText(SONGS[selectedSong].title, 38, rgb(255, 255, 255));
   char detail[16];
   snprintf(detail, sizeof(detail), "%u BPM  D%u", SONGS[selectedSong].bpm,
            SONGS[selectedSong].difficulty + 1);
-  centeredText(detail, 48, rgb(255, 190, 0));
-  centeredText("TWIST<> PUSH", 57, rgb(120, 255, 180));
+  centeredSmallText(detail, 48, rgb(255, 190, 0));
+  centeredSmallText("TWIST<> PUSH", 57, rgb(120, 255, 180));
 }
 
 int laneX(Lane lane) {
@@ -669,13 +789,29 @@ void drawInterpolatedRow(int x, int y, int width, Lane lane, float brightness) {
   display->drawFastHLine(x, y, width, noteColor(lane, brightness));
 }
 
+void drawTwistRow(int x, int y, int width, bool requiredSide,
+                  float coverage) {
+  if (coverage <= 0.01f) return;
+  const float brightness = coverage * (requiredSide ? 1.0f : 0.25f);
+  const uint16_t color = requiredSide
+      ? rgb(0, static_cast<uint8_t>(255 * brightness), 0)
+      : rgb(static_cast<uint8_t>(255 * brightness), 0, 0);
+  display->drawFastHLine(x, y, width, color);
+}
+
 void drawNote(const NoteDef &note, int x, float y) {
   const int baseY = floorf(y);
   const float fraction = y - baseY;
-  // Linear pixel coverage: at a half-pixel position the leading and trailing
-  // edge rows each receive 50% brightness while the note body stays constant.
-  const float lowerBlend = fraction;
-  const float upperBlend = 1.0f - fraction;
+  // Frame-aware directional interpolation. Look slightly ahead by a fraction
+  // of the distance travelled per presented frame, brighten the forward row,
+  // and dim the trailing row. Geometry and the fully lit body stay unchanged.
+  const float pixelsPerFrame =
+      (NOTE_HIT_Y - NOTE_TOP_Y) * renderIntervalUs /
+      (NOTE_TRAVEL_MS * 1000000.0f);
+  const float forwardPosition = constrain(
+      fraction + pixelsPerFrame * 0.35f, 0.0f, 1.0f);
+  const float lowerBlend = sqrtf(forwardPosition);
+  const float upperBlend = powf(1.0f - forwardPosition, 1.35f);
 
   // The two-pixel bar is blended across adjacent rows according to its
   // fractional vertical position, producing smoother apparent movement.
@@ -686,15 +822,16 @@ void drawNote(const NoteDef &note, int x, float y) {
     return;
   }
 
-  // Twist bars use a 2-pixel-high half on the requested turn side and a
-  // 1-pixel-high half on the other side. variant=true means twist right.
-  const int tallX = note.variant ? x : x - 5;
-  const int shortX = note.variant ? x - 5 : x;
-  drawInterpolatedRow(tallX, baseY - 1, 5, note.lane, upperBlend);
-  drawInterpolatedRow(tallX, baseY, 5, note.lane, 1.0f);
-  drawInterpolatedRow(tallX, baseY + 1, 5, note.lane, lowerBlend);
-  drawInterpolatedRow(shortX, baseY, 5, note.lane, upperBlend);
-  drawInterpolatedRow(shortX, baseY + 1, 5, note.lane, lowerBlend);
+  // Both twist halves have identical geometry. The requested turn side is
+  // bright green; the other half stays dim red. variant=true means right.
+  const int requiredX = note.variant ? x : x - 5;
+  const int otherX = note.variant ? x - 5 : x;
+  for (int rowOffset = -1; rowOffset <= 1; ++rowOffset) {
+    const float coverage = rowOffset == -1 ? upperBlend :
+                           rowOffset == 0 ? 1.0f : lowerBlend;
+    drawTwistRow(requiredX, baseY + rowOffset, 5, true, coverage);
+    drawTwistRow(otherX, baseY + rowOffset, 5, false, coverage);
+  }
 }
 
 void drawGimmickEffect(uint32_t now, uint32_t t) {
@@ -716,15 +853,30 @@ void drawPlaying(uint32_t now) {
                                         : micros() - runStartedAtUs;
   const float preciseTimeMs = preciseElapsedUs * 0.001f;
   display->fillScreen(0);
-  // Only the internal separators are needed; coloured outer borders can look
-  // like stray pixels beside the left-most and right-most lanes.
+  // Extend the two internal column separators to the top edge.
   for (int x : {21, 41})
-    display->drawFastVLine(x, 7, 50, rgb(45, 45, 45));
-  display->fillRect(2, 0, health * 60 / 100, 3,
-                    health > 30 ? rgb(0, 255, 100) : rgb(255, 30, 20));
+    display->drawFastVLine(x, 0, 57, rgb(45, 45, 45));
+  display->drawFastHLine(2, 0, health * 60 / 100,
+                         health > 30 ? rgb(0, 255, 100)
+                                     : rgb(255, 30, 20));
 
-  const bool wind = gimmickActive(GimmickType::WindGust, t);
   drawGimmickEffect(now, t);
+
+  // Draw the lane-specific timing segments before notes so approaching notes
+  // remain visible as they cross the line. White=idle, green=perfect,
+  // amber=good, and red=miss.
+  for (uint8_t laneIndex = 0; laneIndex < 3; ++laneIndex) {
+    uint16_t barColor = rgb(255, 255, 255);
+    const Judgment result = laneJudgments[laneIndex];
+    if (result != Judgment::None &&
+        now - laneJudgmentShownAt[laneIndex] < 300) {
+      barColor = result == Judgment::Perfect ? rgb(0, 255, 70) :
+                 result == Judgment::Good ? rgb(255, 180, 0) :
+                                            rgb(255, 0, 0);
+    }
+    display->drawFastHLine(2 + laneIndex * 20, NOTE_HIT_Y, 20, barColor);
+  }
+
   int drawnX[24]{};
   int drawnY[24]{};
   uint8_t drawnCount = 0;
@@ -739,13 +891,19 @@ void drawPlaying(uint32_t now) {
     if (y < NOTE_TOP_Y || y > 61) continue;
     const int collisionY = lroundf(y);
 
-    int x = laneX(chart[i].lane);
-    if (wind && y < GIMMICK_SAFE_ZONE_Y) {
-      const int direction = ((i + selectedSong) & 1) ? 1 : -1;
-      // A gust can visibly carry a note about one full lane sideways. The
-      // note's color still communicates which physical action it requires.
-      const int strength = 4 + (GIMMICK_SAFE_ZONE_Y - y) / 2;
-      x = constrain(x + direction * strength, 6, 58);
+    const int startX = laneX(chart[i].lane);
+    int x = startX;
+    if (chart[i].windShift != 0) {
+      const int targetLane = constrain(
+          static_cast<int>(chart[i].lane) + chart[i].windShift, 0, 2);
+      const int targetX = laneX(static_cast<Lane>(targetLane));
+      const float transition = constrain(
+          (y - NOTE_TOP_Y) /
+              static_cast<float>(GIMMICK_SAFE_ZONE_Y - NOTE_TOP_Y),
+          0.0f, 1.0f);
+      const float eased = transition * transition *
+                          (3.0f - 2.0f * transition);
+      x = lroundf(startX + (targetX - startX) * eased);
     }
 
     // Find a nearby non-overlapping horizontal slot. With 10x2 bars and a
@@ -771,6 +929,21 @@ void drawPlaying(uint32_t now) {
     }
     if (!placed) continue;
 
+    if (chart[i].holdMs > 0) {
+      const float tailUntil = chart[i].hitMs + chart[i].holdMs - preciseTimeMs;
+      const float tailY = NOTE_HIT_Y -
+          tailUntil * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) /
+          NOTE_TRAVEL_MS;
+      const int railTop = max(NOTE_TOP_Y, static_cast<int>(lroundf(tailY)));
+      const int railBottom = min(61, static_cast<int>(lroundf(y)));
+      if (railBottom >= railTop) {
+        const uint16_t railColor = noteColor(chart[i].lane, 0.30f);
+        display->drawFastVLine(x - 5, railTop,
+                               railBottom - railTop + 1, railColor);
+        display->drawFastVLine(x + 4, railTop,
+                               railBottom - railTop + 1, railColor);
+      }
+    }
     drawNote(chart[i], x, y);
     if (drawnCount < sizeof(drawnX) / sizeof(drawnX[0])) {
       drawnX[drawnCount] = x;
@@ -778,9 +951,6 @@ void drawPlaying(uint32_t now) {
       ++drawnCount;
     }
   }
-
-  // Draw last so the lane separators cannot tint any timing-bar pixels.
-  display->drawFastHLine(2, NOTE_HIT_Y, 60, rgb(255, 255, 255));
 
   display->setTextSize(1);
   display->setTextColor(rgb(255, 255, 255));
@@ -860,6 +1030,12 @@ void setup() {
   config.i2sspeed = HUB75_I2S_CFG::HZ_8M;
   config.min_refresh_rate = 120;
   config.setPixelColorDepthBits(5);
+  // Blank OE for an additional clock around LAT. This suppresses brief row
+  // data leakage that appears most clearly as coloured fringes around text.
+  config.latch_blanking = 2;
+  // Clock data on the opposite edge to remove coloured fringes/ghost pixels
+  // around high-contrast shapes such as white text.
+  config.clkphase = false;
 
   dmaDisplay = new MatrixPanel_I2S_DMA(config);
   if (!dmaDisplay->begin()) {
@@ -913,6 +1089,7 @@ void loop() {
   if (screen == Screen::Playing) {
     const uint32_t t = songTime(now);
     updateStartupAutoPlay(t);
+    updateHolds(t);
     expireMisses(t);
   }
 
