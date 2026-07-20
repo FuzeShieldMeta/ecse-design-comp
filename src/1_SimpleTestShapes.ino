@@ -2,6 +2,9 @@
 #include <ESP32-HUB75-VirtualMatrixPanel_T.hpp>
 #include <Fonts/Picopixel.h>
 #include <driver/i2s.h>
+#include <new>
+
+#include "SongImport.h"
 
 // BOP Rhythm: two 64x32 HUB75 panels presented as one 64x64 display.
 #define PANEL_RES_X 64
@@ -61,17 +64,9 @@ enum class Lane : uint8_t { Twist, Push, Pull };
 enum class Gesture : uint8_t { None, TwistLeft, TwistRight, PullHalf, PullFull };
 enum class Judgment : uint8_t { None, Perfect, Good, Miss };
 enum class Screen : uint8_t { Select, Playing, Paused, Results, Failed };
+enum class DisplayProfile : uint8_t { None, Select, Game };
 enum class GimmickType : uint8_t { WindGust };
 enum class PullState : uint8_t { Rest, Half, Full, Fault };
-
-struct SongDef {
-  const char *title;
-  const char *artist;
-  uint16_t bpm;
-  uint8_t bars;
-  uint8_t difficulty;
-  uint32_t color;
-};
 
 struct NoteDef {
   uint32_t hitMs;
@@ -94,25 +89,8 @@ struct GimmickDef {
   float amount;
 };
 
-constexpr SongDef SONGS[] = {
-  {"TEST GRID", "BOP LAB", 96,  8, 0, 0x00eaff},
-  {"SYNC STEP", "BOP LAB", 120, 10, 1, 0xff28ba},
-  {"PULL RUSH", "BOP LAB", 144, 12, 2, 0xffb000},
-};
-// Original looping synthesizer patterns. -1 is a rest; values are MIDI notes.
-constexpr int8_t MELODIES[][16] = {
-  {72, -1, 72, 76, 67, -1, 67, 79, 72, -1, 76, 79, 67, 72, 79, -1},
-  {72, 76, 79, 76, 67, 72, 76, 79, 72, 79, 81, 79, 76, 72, 67, -1},
-  {72, 79, 76, 84, 79, 76, 72, 67, 72, 76, 79, 84, 81, 79, 76, 72},
-};
-constexpr int8_t BASSES[][16] = {
-  {48, -1, -1, -1, 48, -1, -1, -1, 53, -1, -1, -1, 55, -1, -1, -1},
-  {48, -1, 48, -1, 53, -1, 53, -1, 55, -1, 55, -1, 53, -1, 50, -1},
-  {48, -1, 48, 48, 53, -1, 53, 53, 55, -1, 55, 55, 58, 55, 53, 50},
-};
-constexpr size_t SONG_COUNT = sizeof(SONGS) / sizeof(SONGS[0]);
 constexpr size_t MAX_NOTES = 220;
-constexpr size_t GIMMICK_COUNT = 2;
+constexpr size_t GIMMICK_COUNT = BopImport::MAX_GIMMICKS;
 constexpr int NOTE_HIT_Y = 58;
 constexpr int NOTE_TOP_Y = 0;
 constexpr int GIMMICK_SAFE_ZONE_Y = 26;  // Bottom 60% begins here.
@@ -125,6 +103,9 @@ constexpr int NOTE_WIDTH = 11;
 constexpr int TWIST_REQUIRED_WIDTH = 8;
 constexpr int TWIST_OTHER_WIDTH = 2;
 constexpr uint16_t HEALTH_REGEN_FLASH_MS = 350;
+constexpr uint8_t SELECT_COLOR_DEPTH_BITS = 8;
+constexpr uint8_t GAME_COLOR_DEPTH_BITS = 5;
+constexpr uint32_t SELECT_RENDER_INTERVAL_US = 33333UL;  // 30 FPS
 constexpr int32_t SAFE_ZONE_LEAD_MS =
     NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) /
     (NOTE_HIT_Y - NOTE_TOP_Y);
@@ -182,6 +163,9 @@ DebouncedInput pullRest{PIN_PULL_REST, false};
 DebouncedInput pullFull{PIN_PULL_FULL, true};
 
 volatile Screen screen = Screen::Select;
+DisplayProfile activeDisplayProfile = DisplayProfile::None;
+uint8_t activeDmaColorDepth = 0;
+bool rebuildDisplay(DisplayProfile profile);
 PullState previousPullState = PullState::Rest;
 volatile uint32_t runStartedAt = 0;
 volatile uint32_t runStartedAtUs = 0;
@@ -218,6 +202,53 @@ bool startupAutoPlay = false;
 bool startupDemoRestartPending = false;
 uint8_t startupCarouselCycles = 0;
 uint32_t startupTestChangedAt = 0;
+volatile uint32_t audioRunGeneration = 0;
+BopImport::Chart importedChart{};
+uint8_t songCovers[BopImport::MAX_SONGS][BopImport::COVER_RGB888_BYTES]{};
+bool songCoverLoaded[BopImport::MAX_SONGS]{};
+
+size_t songCount() {
+  return BopImport::songCount();
+}
+
+const BopImport::Song *importedSong(size_t index) {
+  return BopImport::song(index);
+}
+
+const char *songTitle(size_t index) {
+  const BopImport::Song *external = importedSong(index);
+  return external != nullptr ? external->title : "NO SONG";
+}
+
+const char *songArtist(size_t index) {
+  const BopImport::Song *external = importedSong(index);
+  return external != nullptr ? external->artist : "";
+}
+
+uint16_t songBpm(size_t index) {
+  const BopImport::Song *external = importedSong(index);
+  return external != nullptr ? external->bpm : 120;
+}
+
+uint8_t songDifficulty(size_t index) {
+  const BopImport::Song *external = importedSong(index);
+  return external != nullptr ? external->difficulty : 0;
+}
+
+uint32_t songCoverColor(size_t index) {
+  const BopImport::Song *external = importedSong(index);
+  return external != nullptr ? external->color : 0;
+}
+
+void loadSongCovers() {
+  for (size_t index = 0; index < songCount(); ++index) {
+    songCoverLoaded[index] = BopImport::loadCover(
+        index, songCovers[index], BopImport::COVER_RGB888_BYTES);
+    if (!songCoverLoaded[index])
+      Serial.printf("Cover unavailable or invalid for song %u\n",
+                    static_cast<unsigned>(index));
+  }
+}
 
 uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
   return dmaDisplay->color565(r, g, b);
@@ -242,33 +273,39 @@ PullState readPullState() {
   return PullState::Half;
 }
 
-void assignChartColumns() {
-  // Reserve one of the three real column centres for the complete duration of
-  // every hold. This is calculated once as chart data, never from live render
-  // collisions, and therefore cannot leave a note parked between columns.
-  uint32_t occupiedUntil[3] = {0, 0, 0};
-  for (size_t i = 0; i < noteCount; ++i) {
-    NoteDef &note = chart[i];
-    const uint8_t desired = note.endColumn;
-    uint8_t chosen = desired;
-    bool found = note.hitMs > occupiedUntil[chosen];
-
-    for (uint8_t distance = 1; !found && distance < 3; ++distance) {
-      const int left = static_cast<int>(desired) - distance;
-      const int right = static_cast<int>(desired) + distance;
-      if (left >= 0 && note.hitMs > occupiedUntil[left]) {
-        chosen = left;
-        found = true;
-      } else if (right < 3 && note.hitMs > occupiedUntil[right]) {
-        chosen = right;
-        found = true;
-      }
-    }
-
-    if (note.shiftEndMs == 0) note.startColumn = chosen;
-    note.endColumn = chosen;
-    occupiedUntil[chosen] = note.hitMs + note.holdMs;
+bool buildImportedChart() {
+  if (!BopImport::loadChart(selectedSong, importedChart)) {
+    Serial.printf("Chart import failed for song %u\n", selectedSong);
+    return false;
   }
+
+  noteCount = min(importedChart.noteCount, MAX_NOTES);
+  for (size_t i = 0; i < noteCount; ++i) {
+    const BopImport::ChartNote &source = importedChart.notes[i];
+    chart[i] = {
+      source.hitMs,
+      static_cast<Lane>(source.lane),
+      source.variant,
+      source.bonus,
+      source.holdMs,
+      source.endVariant,
+      source.transitionMs,
+      source.startColumn,
+      source.endColumn,
+      source.shiftStartMs,
+      source.shiftEndMs
+    };
+  }
+  for (size_t i = 0; i < GIMMICK_COUNT; ++i) gimmicks[i].durationMs = 0;
+  const size_t importedGimmicks = min(importedChart.gimmickCount,
+                                      GIMMICK_COUNT);
+  for (size_t i = 0; i < importedGimmicks; ++i) {
+    gimmicks[i] = {importedChart.gimmicks[i].startMs,
+                   importedChart.gimmicks[i].durationMs,
+                   GimmickType::WindGust, 1.0f};
+  }
+  songDurationMs = importedChart.durationMs;
+  return true;
 }
 
 bool gimmickActive(GimmickType type, uint32_t t, float *amount = nullptr) {
@@ -282,94 +319,17 @@ bool gimmickActive(GimmickType type, uint32_t t, float *amount = nullptr) {
 }
 
 void buildChart() {
-  const SongDef &song = SONGS[selectedSong];
-  const uint32_t stepMs = 60000UL / song.bpm / 4;
-  const uint16_t totalSteps = song.bars * 16;
-  noteCount = 0;
-  uint8_t twistNoteNumber = 0;
-  uint8_t pullNoteNumber = 0;
-  uint8_t pullTransitionNumber = 0;
-
-  for (uint16_t step = 0; step < totalSteps && noteCount < MAX_NOTES; step += 2) {
-    const Lane lane = static_cast<Lane>((step / 2 + step / 16 + selectedSong) % 3);
-    bool longHold = false;
-    if (lane == Lane::Twist) {
-      ++twistNoteNumber;
-      longHold = twistNoteNumber % 6 == 4;
-    } else if (lane == Lane::Pull) {
-      ++pullNoteNumber;
-      longHold = pullNoteNumber % 6 == 4;
-    }
-    const uint16_t holdMs = longHold ? stepMs * 3 : 0;
-    bool variant = static_cast<bool>(((step / 2) + selectedSong) & 1);
-    bool endVariant = variant;
-    uint16_t pullTransitionMs = 0;
-    if (lane == Lane::Pull && longHold) {
-      // Alternate examples guarantee both half-to-full and full-to-half
-      // transitions are represented in every sufficiently long chart.
-      variant = static_cast<bool>(pullTransitionNumber & 1);
-      endVariant = !variant;
-      pullTransitionMs = holdMs / 2;
-      ++pullTransitionNumber;
-    }
-    chart[noteCount++] = {
-      2000UL + step * stepMs,
-      lane,
-      variant,
-      static_cast<bool>(step >= totalSteps * 3 / 4),
-      holdMs,
-      endVariant,
-      pullTransitionMs,
-      static_cast<uint8_t>(lane),
-      static_cast<uint8_t>(lane),
-      0,
-      0
-    };
-
-    if (step > 0 && step % 24 == 0 && noteCount < MAX_NOTES) {
-      const Lane second = static_cast<Lane>((static_cast<uint8_t>(lane) + 1) % 3);
-      chart[noteCount++] = {2000UL + step * stepMs, second,
-                            static_cast<bool>((step / 8) & 1), true, 0,
-                            static_cast<bool>((step / 8) & 1), 0,
-                            static_cast<uint8_t>(second),
-                            static_cast<uint8_t>(second), 0, 0};
-    }
+  if (!buildImportedChart()) {
+    noteCount = 0;
+    songDurationMs = 3000;
+    for (GimmickDef &gimmick : gimmicks) gimmick.durationMs = 0;
   }
-
   memset(resolved, 0, sizeof(resolved));
   memset(holding, 0, sizeof(holding));
   memset(noteVisibleUntilMs, 0, sizeof(noteVisibleUntilMs));
   memset(holdLastScoreAt, 0, sizeof(holdLastScoreAt));
   memset(holdScoreAccumulator, 0, sizeof(holdScoreAccumulator));
   for (Judgment &result : holdStartJudgment) result = Judgment::None;
-  songDurationMs = 2000UL + totalSteps * stepMs;
-  gimmicks[0] = {songDurationMs / 3,     2800, GimmickType::WindGust, 1.0f};
-  gimmicks[1] = {songDurationMs * 2 / 3, 2800, GimmickType::WindGust, 1.0f};
-
-  // Preselect notes whose upper-screen approach intersects a gust. They move
-  // into a neighboring column before the protected bottom zone and stay there.
-  for (size_t i = 0; i < noteCount; ++i) {
-    const uint32_t upperStart = chart[i].hitMs > NOTE_TRAVEL_MS
-                                    ? chart[i].hitMs - NOTE_TRAVEL_MS : 0;
-    const uint32_t safeEntry = chart[i].hitMs > SAFE_ZONE_LEAD_MS
-                                   ? chart[i].hitMs - SAFE_ZONE_LEAD_MS : 0;
-    for (const GimmickDef &g : gimmicks) {
-      if (upperStart < g.startMs + g.durationMs && safeEntry > g.startMs) {
-        const int lane = static_cast<int>(chart[i].lane);
-        const int shift = lane == 0 ? 1 : lane == 2 ? -1 :
-                          ((i + selectedSong) & 1 ? 1 : -1);
-        chart[i].endColumn = constrain(lane + shift, 0, 2);
-        chart[i].shiftStartMs = max(upperStart, g.startMs);
-        chart[i].shiftEndMs = min(safeEntry, g.startMs + g.durationMs);
-        break;
-      }
-    }
-  }
-  assignChartColumns();
-}
-
-float midiFrequency(int8_t note) {
-  return note < 0 ? 0.0f : 440.0f * powf(2.0f, (note - 69) / 12.0f);
 }
 
 bool initAudio() {
@@ -410,78 +370,48 @@ bool initAudio() {
 
 void audioTask(void *) {
   constexpr size_t FRAME_COUNT = 128;
+  constexpr float IMPORTED_AUDIO_GAIN = 0.35f;
   int16_t samples[FRAME_COUNT * 2];
-  float melodyPhase = 0.0f;
-  float bassPhase = 0.0f;
-  float cuePhase = 0.0f;
-  float kickPhase = 0.0f;
+  BopImport::WavReader wav;
+  uint32_t loadedGeneration = UINT32_MAX;
+  bool wavOpenAttempted = false;
 
   for (;;) {
     const bool active = screen == Screen::Playing;
     const uint32_t t = active ? songTime(millis()) : 0;
-    const SongDef &song = SONGS[selectedSong];
-    const uint32_t stepMs = 60000UL / song.bpm / 4;
-    const uint32_t beatMs = stepMs * 4;
-    const uint32_t musicalTime = t >= 2000 ? t - 2000 : 0;
-    const uint32_t stepNumber = musicalTime / stepMs;
-    const uint8_t patternStep = stepNumber % 16;
-    const float melodyHz = active && t >= 2000
-                                ? midiFrequency(MELODIES[selectedSong][patternStep])
-                                : 0.0f;
-    const float bassHz = active && t >= 2000
-                              ? midiFrequency(BASSES[selectedSong][patternStep])
-                              : 0.0f;
-    const uint32_t stepAge = musicalTime % stepMs;
-    const uint32_t beatAge = musicalTime % beatMs;
-
-    float cueHz = 0.0f;
-    uint32_t cueAge = UINT32_MAX;
-    if (active) {
-      for (size_t n = 0; n < noteCount; ++n) {
-        if (t >= chart[n].hitMs && t - chart[n].hitMs < 90) {
-          cueHz = chart[n].lane == Lane::Twist ? 880.0f :
-                  chart[n].lane == Lane::Push ? 1046.5f : 1318.5f;
-          cueAge = t - chart[n].hitMs;
-          break;
-        }
-      }
+    const uint8_t songIndex = selectedSong;
+    const BopImport::Song *song = importedSong(songIndex);
+    const uint32_t generation = audioRunGeneration;
+    if (generation != loadedGeneration) {
+      wav.close();
+      wavOpenAttempted = false;
+      loadedGeneration = generation;
     }
 
-    for (size_t i = 0; i < FRAME_COUNT; ++i) {
-      int32_t mix = 0;
-      const float sampleMs = i * 1000.0f / AUDIO_SAMPLE_RATE;
-
-      if (melodyHz > 0.0f && stepAge + sampleMs < stepMs * 0.78f) {
-        melodyPhase += melodyHz / AUDIO_SAMPLE_RATE;
-        if (melodyPhase >= 1.0f) melodyPhase -= 1.0f;
-        const float age = (stepAge + sampleMs) / stepMs;
-        const float envelope = age < 0.06f ? age / 0.06f :
-                               age > 0.62f ? (0.78f - age) / 0.16f : 1.0f;
-        mix += static_cast<int32_t>(sinf(melodyPhase * TWO_PI) * 3900 *
-                                    max(0.0f, envelope));
+    memset(samples, 0, sizeof(samples));
+    if (active && song != nullptr && t >= song->audioStartMs &&
+        !wavOpenAttempted) {
+      wavOpenAttempted = true;
+      if (!wav.open(song->audioPath))
+        Serial.printf("WAV unavailable or unsupported: %s\n", song->audioPath);
+    }
+    if (active && song != nullptr && t >= song->audioStartMs &&
+        wav.isOpen()) {
+      size_t produced = 0;
+      while (produced < FRAME_COUNT) {
+        size_t frames = wav.readStereo(samples + produced * 2,
+                                       FRAME_COUNT - produced);
+        if (frames == 0) {
+          if (!song->audioLoop || !wav.rewind()) break;
+          frames = wav.readStereo(samples + produced * 2,
+                                  FRAME_COUNT - produced);
+          if (frames == 0) break;
+        }
+        produced += frames;
+        if (produced == FRAME_COUNT || !song->audioLoop || !wav.rewind()) break;
       }
-      if (bassHz > 0.0f && stepAge + sampleMs < stepMs * 0.88f) {
-        bassPhase += bassHz / AUDIO_SAMPLE_RATE;
-        if (bassPhase >= 1.0f) bassPhase -= 1.0f;
-        mix += static_cast<int32_t>(sinf(bassPhase * TWO_PI) * 2300);
-      }
-      if (active && t >= 2000 && beatAge + sampleMs < 55.0f) {
-        const float kickAge = beatAge + sampleMs;
-        const float kickHz = 130.0f - kickAge * 1.5f;
-        kickPhase += max(45.0f, kickHz) / AUDIO_SAMPLE_RATE;
-        if (kickPhase >= 1.0f) kickPhase -= 1.0f;
-        mix += static_cast<int32_t>(sinf(kickPhase * TWO_PI) *
-                                    (2600.0f * (1.0f - kickAge / 55.0f)));
-      }
-      if (cueAge != UINT32_MAX && cueAge + sampleMs < 90.0f) {
-        cuePhase += cueHz / AUDIO_SAMPLE_RATE;
-        if (cuePhase >= 1.0f) cuePhase -= 1.0f;
-        const float envelope = 1.0f - (cueAge + sampleMs) / 90.0f;
-        mix += static_cast<int32_t>(sinf(cuePhase * TWO_PI) * 1200 * envelope);
-      }
-
-      mix = constrain(mix, -12000, 12000);
-      samples[i * 2] = samples[i * 2 + 1] = static_cast<int16_t>(mix);
+      for (size_t i = 0; i < produced * 2; ++i)
+        samples[i] = static_cast<int16_t>(samples[i] * IMPORTED_AUDIO_GAIN);
     }
 
     size_t written = 0;
@@ -490,7 +420,12 @@ void audioTask(void *) {
 }
 
 void startRun(uint32_t now) {
+  if (songCount() == 0 || selectedSong >= songCount()) return;
   buildChart();
+  // Stop and release the high-colour selection buffers before timing or audio
+  // begins, then allocate the faster gameplay profile from a clean heap.
+  if (!rebuildDisplay(DisplayProfile::Game)) return;
+  now = millis();
   score = 0;
   combo = maxCombo = perfects = goods = misses = 0;
   health = 100;
@@ -500,7 +435,7 @@ void startRun(uint32_t now) {
   healthAnimationAt = now;
   healthRegenAt = 0;
   healthRegenFromWidth = healthRegenToWidth = 60;
-  difficulty = SONGS[selectedSong].difficulty;
+  difficulty = songDifficulty(selectedSong);
   lastJudgment = Judgment::None;
   for (uint8_t lane = 0; lane < 3; ++lane) {
     laneJudgments[lane] = Judgment::None;
@@ -509,6 +444,7 @@ void startRun(uint32_t now) {
   previousPullState = readPullState();
   runStartedAt = now;
   runStartedAtUs = micros();
+  ++audioRunGeneration;
   screen = Screen::Playing;
 }
 
@@ -600,10 +536,19 @@ void judge(Judgment result, Lane lane, bool bonus = false) {
 
 void updateStartupSelfTest(uint32_t now) {
   if (!startupTestActive || screen != Screen::Select) return;
+  if (songCount() == 0) {
+    startupTestActive = false;
+    return;
+  }
 
-  if (startupCarouselCycles < SELF_TEST_CAROUSEL_CYCLES) {
+  // Startup is a linear preview of the imported index, not a circular pass.
+  // Clamp the requested test steps to the last song so a missing/removed chart
+  // can never make the initial preview wrap from its final entry to song zero.
+  const uint8_t startupStepLimit = min<size_t>(
+      SELF_TEST_CAROUSEL_CYCLES, songCount() - 1);
+  if (startupCarouselCycles < startupStepLimit) {
     if (now - startupTestChangedAt < SELF_TEST_CAROUSEL_INTERVAL_MS) return;
-    selectedSong = (selectedSong + 1) % SONG_COUNT;
+    ++selectedSong;
     carouselSlide = 1;
     carouselChangedAt = now;
     startupTestChangedAt = now;
@@ -679,10 +624,14 @@ void updateRepeatingDemo(uint32_t now) {
 
   if (screen == Screen::Results || screen == Screen::Failed) {
     if (now - endShownAt < SELF_TEST_RESULT_HOLD_MS) return;
+    if (songCount() == 0) {
+      startupAutoPlay = false;
+      return;
+    }
 
     // Advance exactly one cover between demo runs. Leave the select screen
     // visible while the carousel slide settles before starting the next song.
-    selectedSong = (selectedSong + 1) % SONG_COUNT;
+    selectedSong = (selectedSong + 1) % songCount();
     carouselSlide = 1;
     carouselChangedAt = now;
     startupTestChangedAt = now;
@@ -808,14 +757,14 @@ void updateInputs(uint32_t now) {
   if (screen == Screen::Select) {
     // Physical selection is deliberately locked during the deterministic
     // carousel test and its repeating autoplay song transitions.
-    if (startupTestActive || startupAutoPlay) return;
+    if (startupTestActive || startupAutoPlay || songCount() == 0) return;
     if (twistLeft.pressedEdge) {
-      selectedSong = (selectedSong + SONG_COUNT - 1) % SONG_COUNT;
+      selectedSong = (selectedSong + songCount() - 1) % songCount();
       carouselSlide = -1;
       carouselChangedAt = now;
     }
     if (twistRight.pressedEdge) {
-      selectedSong = (selectedSong + 1) % SONG_COUNT;
+      selectedSong = (selectedSong + 1) % songCount();
       carouselSlide = 1;
       carouselChangedAt = now;
     }
@@ -897,58 +846,102 @@ void centeredSmallText(const char *text, int top, uint16_t color) {
   display->setFont(nullptr);
 }
 
+// The DMA colour depth is fixed when its framebuffers are allocated. Cover
+// art nevertheless retains RGB888 source values, so distribute each channel's
+// two discarded low bits spatially across a stable 4x4 Bayer pattern. At
+// normal viewing distance adjacent LEDs blend into intermediate shades. This
+// is deliberately used only by the song-selection covers; gameplay keeps its
+// existing RGB565 palette and timing cost.
+uint8_t ditherCoverChannel(uint8_t value, int sourceX, int sourceY) {
+  if (activeDmaColorDepth >= 8) return value;
+  static constexpr uint8_t bayer4x4[4][4] = {
+      {0, 8, 2, 10},
+      {12, 4, 14, 6},
+      {3, 11, 1, 9},
+      {15, 7, 13, 5},
+  };
+  uint8_t sixBit = value >> 2;
+  const uint8_t remainder = value & 0x03;
+  const uint8_t threshold = bayer4x4[sourceY & 3][sourceX & 3];
+  if (sixBit < 63 && remainder * 4 > threshold) ++sixBit;
+  // Expand back to an eight-bit argument without inventing another level;
+  // drawPixelRGB888() will submit this value to the six-bit DMA planes.
+  return static_cast<uint8_t>((sixBit << 2) | (sixBit >> 4));
+}
+
 void drawCoverArt(uint8_t index, int x, int y, int size, bool focused) {
-  const uint32_t raw = SONGS[index].color;
+  const uint32_t raw = songCoverColor(index);
   const uint8_t r = raw >> 16;
   const uint8_t g = raw >> 8;
   const uint8_t b = raw;
   const uint16_t accent = rgb(r, g, b);
-  display->fillRect(x, y, size, size, rgb(r / 14, g / 14, b / 14));
-  display->drawRect(x, y, size, size, focused ? rgb(255, 255, 255) : accent);
-
-  if (index == 0) {
-    for (int yy = 4; yy < size; yy += 5)
-      display->drawFastHLine(x + 1, y + yy, size - 2, rgb(0, 55, 75));
-    for (int xx = 3; xx < size; xx += 6)
-      display->drawLine(x + size / 2, y + size / 2, x + xx, y + size - 2, accent);
-    display->fillCircle(x + size / 2, y + size / 3, max(2, size / 7), rgb(255, 60, 190));
-  } else if (index == 1) {
-    for (int yy = 2; yy < size - 2; yy += 5)
-      for (int xx = 2; xx < size - 2; xx += 5)
-        if (((xx + yy) / 5) & 1)
-          display->fillRect(x + xx, y + yy, 3, 3, rgb(70, 5, 75));
-    display->fillTriangle(x + size / 2, y + 3, x + size - 4, y + size / 2,
-                          x + size / 2, y + size - 4, accent);
-    display->fillTriangle(x + size / 2, y + 3, x + 4, y + size / 2,
-                          x + size / 2, y + size - 4, rgb(60, 0, 100));
+  if (index < BopImport::MAX_SONGS && songCoverLoaded[index]) {
+    for (int destinationY = 0; destinationY < size; ++destinationY) {
+      const int screenY = y + destinationY;
+      if (screenY < 0 || screenY >= 64) continue;
+      const int sourceY = destinationY * BopImport::COVER_HEIGHT / size;
+      for (int destinationX = 0; destinationX < size; ++destinationX) {
+        const int screenX = x + destinationX;
+        if (screenX < 0 || screenX >= 64) continue;
+        const int sourceX = destinationX * BopImport::COVER_WIDTH / size;
+        const size_t sourceOffset =
+            (sourceY * BopImport::COVER_WIDTH + sourceX) * 3;
+        display->drawPixelRGB888(
+            screenX, screenY,
+            ditherCoverChannel(songCovers[index][sourceOffset],
+                               sourceX, sourceY),
+            ditherCoverChannel(songCovers[index][sourceOffset + 1],
+                               sourceX, sourceY),
+            ditherCoverChannel(songCovers[index][sourceOffset + 2],
+                               sourceX, sourceY));
+      }
+    }
   } else {
-    display->fillCircle(x + size / 2, y + size / 2, max(3, size / 3), accent);
-    for (int yy = y + size / 2; yy < y + size - 3; yy += 4)
-      display->drawFastHLine(x + 3, yy, size - 6, rgb(40, 0, 55));
-    display->drawLine(x + 2, y + size - 3, x + size / 2, y + 3, rgb(255, 40, 80));
-    display->drawLine(x + size - 3, y + size - 3, x + size / 2, y + 3, rgb(255, 40, 80));
+    display->fillRect(x, y, size, size, rgb(r / 14, g / 14, b / 14));
+    display->drawLine(x + 2, y + 2, x + size - 3, y + size - 3, accent);
+    display->drawLine(x + size - 3, y + 2, x + 2, y + size - 3, accent);
   }
+  const uint16_t border = focused ? rgb(255, 255, 255) : accent;
+  const int left = max(0, x);
+  const int right = min(63, x + size - 1);
+  if (y >= 0 && y < 64 && right >= left)
+    display->drawFastHLine(left, y, right - left + 1, border);
+  if (y + size - 1 >= 0 && y + size - 1 < 64 && right >= left)
+    display->drawFastHLine(left, y + size - 1, right - left + 1, border);
+  const int top = max(0, y);
+  const int bottom = min(63, y + size - 1);
+  if (x >= 0 && x < 64 && bottom >= top)
+    display->drawFastVLine(x, top, bottom - top + 1, border);
+  if (x + size - 1 >= 0 && x + size - 1 < 64 && bottom >= top)
+    display->drawFastVLine(x + size - 1, top, bottom - top + 1, border);
 }
 
 void drawSelect(uint32_t now) {
   // Start from true black so every pixel not explicitly used is fully off.
   display->fillScreen(0);
   centeredSmallText("SONG SELECT", 0, rgb(0, 255, 255));
+  if (songCount() == 0) {
+    centeredSmallText("NO SONG FILES", 24, rgb(255, 80, 80));
+    centeredSmallText("RUN UPLOADFS", 36, rgb(255, 255, 255));
+    return;
+  }
 
   const uint32_t elapsed = now - carouselChangedAt;
   const float progress = elapsed >= 240 ? 1.0f : elapsed / 240.0f;
   const float eased = 1.0f - (1.0f - progress) * (1.0f - progress);
   const int offset = static_cast<int>(carouselSlide * (1.0f - eased) * 34.0f);
   if (progress >= 1.0f) carouselSlide = 0;
+  const int totalSongs = static_cast<int>(songCount());
   for (int rel = -1; rel <= 1; ++rel) {
-    const int index = (selectedSong + rel + SONG_COUNT) % SONG_COUNT;
-    constexpr int focusedSize = 28;
-    constexpr int sideSize = 22;  // Approximately 20% smaller.
+    const int index = (static_cast<int>(selectedSong) + rel + totalSongs) %
+                      totalSongs;
+    constexpr int focusedSize = 36;
+    constexpr int sideSize = 28;  // Approximately 20% smaller.
     const int centerX = 32 + rel * 34 + offset;
     const int distanceFromFocus = min(34, abs(centerX - 32));
     const int size = focusedSize -
         distanceFromFocus * (focusedSize - sideSize) / 34;
-    const int coverY = 8 + (focusedSize - size) / 2;
+    const int coverY = 6 + (focusedSize - size) / 2;
     drawCoverArt(index, centerX - size / 2, coverY, size,
                  distanceFromFocus <= 2);
   }
@@ -959,11 +952,11 @@ void drawSelect(uint32_t now) {
       ? rgb(0, 210, 255) : rgb(0, 45, 150);
   display->drawTriangle(1, 22, 5, 18, 5, 26, arrowBorder);
   display->drawTriangle(62, 22, 58, 18, 58, 26, arrowBorder);
-  centeredSmallText(SONGS[selectedSong].title, 38, rgb(255, 255, 255));
+  centeredSmallText(songTitle(selectedSong), 43, rgb(255, 255, 255));
   char detail[16];
-  snprintf(detail, sizeof(detail), "%u BPM  D%u", SONGS[selectedSong].bpm,
-           SONGS[selectedSong].difficulty + 1);
-  centeredSmallText(detail, 48, rgb(255, 190, 0));
+  snprintf(detail, sizeof(detail), "%u BPM  D%u", songBpm(selectedSong),
+           songDifficulty(selectedSong) + 1);
+  centeredSmallText(detail, 50, rgb(255, 190, 0));
   centeredSmallText("TWIST<> PUSH", 57, rgb(120, 255, 180));
 }
 
@@ -1330,15 +1323,17 @@ void render(uint32_t now) {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  twistLeft.begin();
-  twistRight.begin();
-  pushInput.begin();
-  pullRest.begin();
-  pullFull.begin();
-  previousPullState = readPullState();
+void releaseDisplayBuffers() {
+  if (dmaDisplay != nullptr) dmaDisplay->stopDMAoutput();
+  delete display;
+  display = nullptr;
+  delete dmaDisplay;
+  dmaDisplay = nullptr;
+  activeDmaColorDepth = 0;
+  activeDisplayProfile = DisplayProfile::None;
+}
 
+bool allocateDisplayBuffers(uint8_t colorDepth) {
   HUB75_I2S_CFG config(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
   config.gpio.r1 = HUB75_R1;
   config.gpio.g1 = HUB75_G1;
@@ -1354,42 +1349,100 @@ void setup() {
   config.gpio.lat = HUB75_LAT;
   config.gpio.oe = HUB75_OE;
   config.gpio.clk = HUB75_CLK;
-  // Render into a hidden framebuffer, then swap it into view. Without this,
-  // the panel scans partially cleared/partially drawn frames as they are built.
   config.double_buff = true;
-  // Keep the HUB75 clock at 8 MHz for signal integrity across both ribbon
-  // cables. Five-bit colour reduces BCM scan time enough to maintain refresh.
   config.i2sspeed = HUB75_I2S_CFG::HZ_8M;
   config.min_refresh_rate = 120;
-  config.setPixelColorDepthBits(5);
-  // Blank OE for an additional clock around LAT. This suppresses brief row
-  // data leakage that appears most clearly as coloured fringes around text.
+  config.setPixelColorDepthBits(colorDepth);
   config.latch_blanking = 2;
-  // Clock data on the opposite edge to remove coloured fringes/ghost pixels
-  // around high-contrast shapes such as white text.
   config.clkphase = false;
 
-  dmaDisplay = new MatrixPanel_I2S_DMA(config);
-  if (!dmaDisplay->begin()) {
-    Serial.println(F("HUB75 DMA allocation failed"));
-    return;
+  MatrixPanel_I2S_DMA *newDma =
+      new (std::nothrow) MatrixPanel_I2S_DMA(config);
+  if (newDma == nullptr || !newDma->begin()) {
+    delete newDma;
+    return false;
   }
-  // Brightness calls made before begin() are ignored by this library.
-  dmaDisplay->setBrightness8(50);
+  auto *newVirtual = new (std::nothrow)
+      VirtualMatrixPanel_T<PANEL_CHAIN_TYPE>(
+          PANEL_ROWS, PANEL_COLS, PANEL_RES_X, PANEL_RES_Y);
+  if (newVirtual == nullptr) {
+    newDma->stopDMAoutput();
+    delete newDma;
+    return false;
+  }
+  newVirtual->setDisplay(*newDma);
+  newDma->setBrightness8(50);
+  newVirtual->clearScreen();
 
-  // A back buffer must remain visible for at least one complete HUB75 scan.
-  // Add 1.5 ms for scheduler jitter and cap presentation at 90 FPS even when
-  // the reported panel refresh is unusually high.
+  dmaDisplay = newDma;
+  display = newVirtual;
+  activeDmaColorDepth = colorDepth;
   if (dmaDisplay->calculated_refresh_rate > 0) {
     const uint32_t panelFrameUs =
         1000000UL / dmaDisplay->calculated_refresh_rate;
     renderIntervalUs = max<uint32_t>(11111UL, panelFrameUs + 1500UL);
+  } else {
+    renderIntervalUs = DEFAULT_RENDER_INTERVAL_US;
   }
+  return true;
+}
 
-  display = new VirtualMatrixPanel_T<PANEL_CHAIN_TYPE>(
-      PANEL_ROWS, PANEL_COLS, PANEL_RES_X, PANEL_RES_Y);
-  display->setDisplay(*dmaDisplay);
-  display->clearScreen();
+bool rebuildDisplay(DisplayProfile profile) {
+  if (profile == activeDisplayProfile && display != nullptr &&
+      dmaDisplay != nullptr) return true;
+
+  const uint8_t requestedDepth = profile == DisplayProfile::Select
+                                     ? SELECT_COLOR_DEPTH_BITS
+                                     : GAME_COLOR_DEPTH_BITS;
+  releaseDisplayBuffers();
+  // Give the I2S DMA driver a scheduling point after releasing its descriptors
+  // before allocating a differently-sized set of buffers.
+  delay(2);
+  uint8_t allocatedDepth = requestedDepth;
+  if (!allocateDisplayBuffers(requestedDepth)) {
+    // Selection can still operate if eight-bit double buffering does not fit
+    // on a particular ESP32 revision. Do not repeatedly retry every frame.
+    if (profile != DisplayProfile::Select ||
+        !allocateDisplayBuffers(6)) {
+      Serial.println(F("HUB75 DMA buffer rebuild failed"));
+      return false;
+    }
+    allocatedDepth = 6;
+    Serial.println(F("HUB75 selection buffer fell back to 6-bit colour"));
+  }
+  activeDmaColorDepth = allocatedDepth;
+  activeDisplayProfile = profile;
+  if (profile == DisplayProfile::Select) {
+    // Covers and text do not require the gameplay presentation rate. Keep the
+    // panel scanning continuously, but swap completed selection buffers only
+    // at 30 FPS to reduce visible redraw/swap activity.
+    renderIntervalUs = max(renderIntervalUs, SELECT_RENDER_INTERVAL_US);
+  }
+  Serial.printf("HUB75 %s buffers: %u-bit colour, %u Hz, %lu us/frame\n",
+                profile == DisplayProfile::Select ? "selection" : "game",
+                activeDmaColorDepth,
+                dmaDisplay->calculated_refresh_rate,
+                static_cast<unsigned long>(renderIntervalUs));
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  const bool songFilesystemReady = BopImport::begin();
+  Serial.printf("Song filesystem %s; %u imported chart(s)\n",
+                songFilesystemReady ? "mounted" : "unavailable",
+                static_cast<unsigned>(BopImport::songCount()));
+  loadSongCovers();
+  if (songCount() == 0) startupTestActive = false;
+  if (startupTestActive) selectedSong = 0;
+  twistLeft.begin();
+  twistRight.begin();
+  pushInput.begin();
+  pullRest.begin();
+  pullFull.begin();
+  previousPullState = readPullState();
+
+  if (!rebuildDisplay(DisplayProfile::Select)) return;
   audioReady = initAudio();
   if (audioReady) {
     xTaskCreatePinnedToCore(audioTask, "bop-audio", 4096, nullptr, 2, nullptr, 0);
@@ -1398,9 +1451,6 @@ void setup() {
   startupTestChangedAt = carouselChangedAt;
   Serial.printf("BOP Rhythm ready; PCM5102A audio %s\n",
                 audioReady ? "enabled" : "disabled");
-  Serial.printf("HUB75 refresh %u Hz; presenting every %lu us\n",
-                dmaDisplay->calculated_refresh_rate,
-                static_cast<unsigned long>(renderIntervalUs));
   Serial.println(F("GPIO34/35/36/39 require external pull-ups"));
 }
 
@@ -1425,6 +1475,15 @@ void loop() {
     expireMisses(t);
   }
   updateRepeatingDemo(now);
+
+  const DisplayProfile desiredProfile = screen == Screen::Select
+                                            ? DisplayProfile::Select
+                                            : DisplayProfile::Game;
+  if (desiredProfile != activeDisplayProfile &&
+      !rebuildDisplay(desiredProfile)) {
+    delay(100);
+    return;
+  }
 
   static uint32_t lastFrameUs = 0;
   const uint32_t frameNowUs = micros();

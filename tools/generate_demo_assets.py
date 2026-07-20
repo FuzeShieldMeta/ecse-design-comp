@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Regenerate the three BOP LAB charts and their loopable PCM WAV assets."""
+
+from __future__ import annotations
+
+import math
+import struct
+import wave
+from pathlib import Path
+
+
+SAMPLE_RATE = 11_025
+NOTE_TRAVEL_MS = 1800
+NOTE_HIT_Y = 58
+GIMMICK_SAFE_ZONE_Y = 26
+SAFE_ZONE_LEAD_MS = (
+    NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) // NOTE_HIT_Y
+)
+OUTPUT = Path(__file__).resolve().parents[1] / "data" / "songs"
+
+SONGS = (
+    {
+        "slug": "test-grid", "title": "TEST GRID", "bpm": 96,
+        "bars": 8, "difficulty": 0, "color": "00EAFF",
+        "melody": (72, -1, 72, 76, 67, -1, 67, 79, 72, -1, 76, 79, 67, 72, 79, -1),
+        "bass": (48, -1, -1, -1, 48, -1, -1, -1, 53, -1, -1, -1, 55, -1, -1, -1),
+    },
+    {
+        "slug": "sync-step", "title": "SYNC STEP", "bpm": 120,
+        "bars": 10, "difficulty": 1, "color": "FF28BA",
+        "melody": (72, 76, 79, 76, 67, 72, 76, 79, 72, 79, 81, 79, 76, 72, 67, -1),
+        "bass": (48, -1, 48, -1, 53, -1, 53, -1, 55, -1, 55, -1, 53, -1, 50, -1),
+    },
+    {
+        "slug": "pull-rush", "title": "PULL RUSH", "bpm": 144,
+        "bars": 12, "difficulty": 2, "color": "FFB000",
+        "melody": (72, 79, 76, 84, 79, 76, 72, 67, 72, 76, 79, 84, 81, 79, 76, 72),
+        "bass": (48, -1, 48, 48, 53, -1, 53, 53, 55, -1, 55, 55, 58, 55, 53, 50),
+    },
+)
+
+
+def midi_frequency(note: int) -> float:
+    return 0.0 if note < 0 else 440.0 * 2.0 ** ((note - 69) / 12.0)
+
+
+def render_cover(song: dict, style: int, destination: Path) -> None:
+    size = 28
+    output_size = 36
+    accent_value = int(song["color"], 16)
+    accent = ((accent_value >> 16) & 255, (accent_value >> 8) & 255,
+              accent_value & 255)
+    dark = tuple(channel // 12 for channel in accent)
+    pixels = [[dark for _ in range(size)] for _ in range(size)]
+
+    if style == 0:
+        for y in range(3, size, 5):
+            for x in range(size):
+                pixels[y][x] = (0, 58, 78)
+        for x in range(2, size, 5):
+            for y in range(size):
+                if (x + y) % 3 == 0:
+                    pixels[y][x] = accent
+        for y in range(7, 15):
+            for x in range(10, 18):
+                if (x - 14) ** 2 + (y - 11) ** 2 <= 15:
+                    pixels[y][x] = (255, 55, 185)
+    elif style == 1:
+        for y in range(size):
+            for x in range(size):
+                if ((x // 4) + (y // 4)) & 1:
+                    pixels[y][x] = (72, 5, 78)
+                if abs(x - 14) + abs(y - 14) <= 9:
+                    pixels[y][x] = accent if x >= 14 else (72, 0, 110)
+    else:
+        for y in range(size):
+            for x in range(size):
+                radius = (x - 14) ** 2 + (y - 14) ** 2
+                if radius <= 90:
+                    pixels[y][x] = accent
+                if 10 <= y <= 18 and (x + y) % 4 == 0:
+                    pixels[y][x] = (55, 0, 70)
+        for offset in range(-1, 2):
+            for y in range(4, 24):
+                x = 14 + (y - 14) // 2 + offset
+                if 0 <= x < size:
+                    pixels[y][x] = (255, 45, 75)
+
+    with destination.open("wb") as output:
+        for output_y in range(output_size):
+            source_y = output_y * size // output_size
+            for output_x in range(output_size):
+                source_x = output_x * size // output_size
+                red, green, blue = pixels[source_y][source_x]
+                output.write(bytes((red, green, blue)))
+
+
+def render_loop(song: dict, destination: Path) -> None:
+    step_ms = 60_000 // song["bpm"] // 4
+    loop_ms = step_ms * 16
+    frame_count = round(loop_ms * SAMPLE_RATE / 1000)
+    melody_phase = bass_phase = kick_phase = 0.0
+    frames = bytearray()
+
+    for frame in range(frame_count):
+        time_ms = frame * 1000.0 / SAMPLE_RATE
+        step_number = int(time_ms // step_ms)
+        pattern_step = step_number % 16
+        step_age = time_ms % step_ms
+        beat_ms = step_ms * 4
+        beat_age = time_ms % beat_ms
+        mix = 0.0
+
+        melody_hz = midi_frequency(song["melody"][pattern_step])
+        if melody_hz and step_age < step_ms * 0.78:
+            melody_phase = (melody_phase + melody_hz / SAMPLE_RATE) % 1.0
+            age = step_age / step_ms
+            envelope = (
+                age / 0.06 if age < 0.06
+                else (0.78 - age) / 0.16 if age > 0.62
+                else 1.0
+            )
+            mix += math.sin(melody_phase * math.tau) * 3900 * max(0.0, envelope)
+
+        bass_hz = midi_frequency(song["bass"][pattern_step])
+        if bass_hz and step_age < step_ms * 0.88:
+            bass_phase = (bass_phase + bass_hz / SAMPLE_RATE) % 1.0
+            mix += math.sin(bass_phase * math.tau) * 2300
+
+        if beat_age < 55.0:
+            kick_hz = max(45.0, 130.0 - beat_age * 1.5)
+            kick_phase = (kick_phase + kick_hz / SAMPLE_RATE) % 1.0
+            mix += math.sin(kick_phase * math.tau) * 2600 * (1.0 - beat_age / 55.0)
+
+        # The firmware applies 35% gain. Scale the stored loop so its resulting
+        # level remains close to the former real-time synthesizer.
+        sample = max(-32767, min(32767, round(mix * 2.5)))
+        fade_frames = SAMPLE_RATE // 200  # Five milliseconds at each seam.
+        if frame < fade_frames:
+            sample = round(sample * frame / fade_frames)
+        elif frame >= frame_count - fade_frames:
+            sample = round(sample * (frame_count - frame - 1) / fade_frames)
+        frames.append(max(0, min(255, (int(sample) >> 8) + 128)))
+
+    with wave.open(str(destination), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(1)
+        output.setframerate(SAMPLE_RATE)
+        output.writeframes(frames)
+
+
+def build_notes(song_index: int, song: dict) -> tuple[list[dict], int, list[tuple[int, int]]]:
+    step_ms = 60_000 // song["bpm"] // 4
+    total_steps = song["bars"] * 16
+    notes: list[dict] = []
+    twist_count = pull_count = transition_count = 0
+
+    for step in range(0, total_steps, 2):
+        lane = (step // 2 + step // 16 + song_index) % 3
+        long_hold = False
+        if lane == 0:
+            twist_count += 1
+            long_hold = twist_count % 6 == 4
+        elif lane == 2:
+            pull_count += 1
+            long_hold = pull_count % 6 == 4
+        hold_ms = step_ms * 3 if long_hold else 0
+        variant = bool(((step // 2) + song_index) & 1)
+        end_variant = variant
+        transition_ms = 0
+        if lane == 2 and long_hold:
+            variant = bool(transition_count & 1)
+            end_variant = not variant
+            transition_ms = hold_ms // 2
+            transition_count += 1
+        notes.append({
+            "hit": 2000 + step * step_ms, "lane": lane,
+            "variant": variant, "bonus": step >= total_steps * 3 // 4,
+            "hold": hold_ms, "end_variant": end_variant,
+            "transition": transition_ms, "start_col": lane, "end_col": lane,
+            "shift_start": 0, "shift_end": 0,
+        })
+        if step > 0 and step % 24 == 0:
+            second = (lane + 1) % 3
+            second_variant = bool((step // 8) & 1)
+            notes.append({
+                "hit": 2000 + step * step_ms, "lane": second,
+                "variant": second_variant, "bonus": True, "hold": 0,
+                "end_variant": second_variant, "transition": 0,
+                "start_col": second, "end_col": second,
+                "shift_start": 0, "shift_end": 0,
+            })
+
+    duration = 2000 + total_steps * step_ms
+    gusts = ((duration // 3, 2800), (duration * 2 // 3, 2800))
+    for index, note in enumerate(notes):
+        upper_start = max(0, note["hit"] - NOTE_TRAVEL_MS)
+        safe_entry = max(0, note["hit"] - SAFE_ZONE_LEAD_MS)
+        for gust_start, gust_duration in gusts:
+            if upper_start < gust_start + gust_duration and safe_entry > gust_start:
+                lane = note["lane"]
+                shift = 1 if lane == 0 else -1 if lane == 2 else (
+                    1 if ((index + song_index) & 1) else -1
+                )
+                note["end_col"] = max(0, min(2, lane + shift))
+                note["shift_start"] = max(upper_start, gust_start)
+                note["shift_end"] = min(safe_entry, gust_start + gust_duration)
+                break
+
+    occupied_until = [0, 0, 0]
+    for note in notes:
+        desired = note["end_col"]
+        choices = [desired]
+        for distance in (1, 2):
+            choices.extend((desired - distance, desired + distance))
+        chosen = next(
+            (column for column in choices
+             if 0 <= column < 3 and note["hit"] > occupied_until[column]),
+            desired,
+        )
+        if note["shift_end"] == 0:
+            note["start_col"] = chosen
+        note["end_col"] = chosen
+        occupied_until[chosen] = note["hit"] + note["hold"]
+    return notes, duration, list(gusts)
+
+
+def action(lane: int, variant: bool) -> str:
+    return ("right" if variant else "left") if lane == 0 else (
+        "tap" if lane == 1 else "full" if variant else "half"
+    )
+
+
+def write_chart(song_index: int, song: dict, destination: Path) -> None:
+    notes, duration, gusts = build_notes(song_index, song)
+    lines = [
+        "# Generated by tools/generate_demo_assets.py",
+        "version=BOP1",
+        f"title={song['title']}",
+        "artist=BOP LAB",
+        f"bpm={song['bpm']}",
+        f"difficulty={song['difficulty']}",
+        f"color=#{song['color']}",
+        f"audio=/songs/{song['slug']}.wav",
+        f"cover=/songs/{song['slug']}.rgb888",
+        "audio_start=2000",
+        "audio_loop=1",
+        f"duration={duration}",
+        "",
+    ]
+    lines.extend(f"wind={start},{length}" for start, length in gusts)
+    lines.append("")
+    for note in notes:
+        lane_name = ("twist", "push", "pull")[note["lane"]]
+        lines.append(
+            "note={hit},{lane},{start},{hold},{end},{transition},{bonus},"
+            "{start_col},{end_col},{shift_start},{shift_end}".format(
+                hit=note["hit"], lane=lane_name,
+                start=action(note["lane"], note["variant"]),
+                hold=note["hold"],
+                end=(action(note["lane"], note["end_variant"])
+                     if note["end_variant"] != note["variant"] else "same"),
+                transition=note["transition"], bonus=int(note["bonus"]),
+                start_col=note["start_col"], end_col=note["end_col"],
+                shift_start=note["shift_start"], shift_end=note["shift_end"],
+            )
+        )
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    for index, song in enumerate(SONGS):
+        write_chart(index, song, OUTPUT / f"{song['slug']}.bop")
+        render_loop(song, OUTPUT / f"{song['slug']}.wav")
+        render_cover(song, index, OUTPUT / f"{song['slug']}.rgb888")
+
+
+if __name__ == "__main__":
+    main()
