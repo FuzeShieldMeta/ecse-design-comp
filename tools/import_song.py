@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import a PCM WAV and cover image as a synchronized BOP1 song bundle."""
+"""Import a PCM WAV and cover image as a synchronized BOP song bundle."""
 
 from __future__ import annotations
 
@@ -139,8 +139,8 @@ def contextual_notes(features: dict[str, np.ndarray], duration: float,
             "hit": round(onset_time * 1000), "lane": lane,
             "variant": variant, "end_variant": variant, "hold": 0,
             "transition": 0, "bonus": onset_time >= duration * 0.75,
-            "start_col": lane, "end_col": lane,
-            "shift_start": 0, "shift_end": 0,
+            "end_col": lane, "shift_start": 0, "shift_end": 0,
+            "gimmick_id": 0,
             "onset": onset, "rms": rms,
         })
 
@@ -194,11 +194,91 @@ def section_gusts(features: dict[str, np.ndarray], duration: float) -> list[tupl
     return sorted((round(time * 1000), 2800) for time in selected)
 
 
+def contextual_visual_gimmicks(features: dict[str, np.ndarray], duration: float,
+                               gusts: list[tuple[int, int]]) -> list[dict]:
+    frame_times = np.arange(len(features["flux"])) * HOP / ANALYSIS_RATE
+    usable = (frame_times >= 6.0) & (frame_times <= duration - 4.0)
+    for start_ms, gust_duration in gusts:
+        gust_center = (start_ms + gust_duration / 2) / 1000.0
+        usable &= np.abs(frame_times - gust_center) >= 4.0
+
+    flash_times: list[float] = []
+    usable_indices = np.where(usable)[0]
+    for index in usable_indices[np.argsort(features["flux"][usable_indices])[::-1]]:
+        candidate = float(frame_times[index])
+        if all(abs(candidate - selected) >= 10.0 for selected in flash_times):
+            flash_times.append(candidate)
+        if len(flash_times) == 2:
+            break
+    if not flash_times:
+        flash_times.append(max(2.0, duration * 0.45))
+    flash_times.sort()
+
+    block_seconds = 2.0
+    block_frames = max(1, round(block_seconds * ANALYSIS_RATE / HOP))
+    band_reference = np.maximum(np.median(features["bands"], axis=0), 1e-9)
+    pulse_candidates: list[tuple[float, float, int]] = []
+    for start in range(0, len(features["rms"]) - block_frames + 1,
+                       block_frames):
+        time_seconds = start * HOP / ANALYSIS_RATE
+        if (time_seconds < 6.0 or time_seconds > duration - 4.0 or
+                any(abs(time_seconds - flash_time) < 5.0
+                    for flash_time in flash_times)):
+            continue
+        if any(abs(time_seconds - gust_start / 1000.0) < 4.0
+               for gust_start, _ in gusts):
+            continue
+        energy = float(features["rms"][start:start + block_frames].mean())
+        normalized_bands = (
+            features["bands"][start:start + block_frames].mean(axis=0) /
+            band_reference
+        )
+        dominant_band = int(np.argmax(normalized_bands))
+        pulse_candidates.append((energy, time_seconds, dominant_band))
+
+    selected_pulses: list[tuple[float, float, int]] = []
+    for candidate in sorted(pulse_candidates, reverse=True):
+        if all(abs(candidate[1] - selected[1]) >= 10.0
+               for selected in selected_pulses):
+            selected_pulses.append(candidate)
+        if len(selected_pulses) == 2:
+            break
+    if not selected_pulses:
+        selected_pulses.append((0.0, max(2.0, duration * 0.7), 1))
+    selected_pulses.sort(key=lambda candidate: candidate[1])
+
+    effects: list[dict] = []
+    flash_styles = (("255:208:96", "checker", 0.26),
+                    ("96:210:255", "stripes", 0.24))
+    for index, flash_time in enumerate(flash_times):
+        color, pattern, brightness = flash_styles[index % len(flash_styles)]
+        effects.append({
+            "type": "screen_flash", "start": round(flash_time * 1000),
+            "duration": 1800,
+            "parameters": (f"target=all,color={color},"
+                           f"brightness={brightness:.2f},rate=3.0,"
+                           f"pattern={pattern}"),
+        })
+
+    # Spectrum bands map low->pull, mid->push, high->twist.
+    lane_colors = {"twist": "255:64:64", "push": "64:255:96",
+                   "pull": "64:96:255"}
+    for _, pulse_time, dominant_band in selected_pulses:
+        lane = ("pull", "push", "twist")[dominant_band]
+        effects.append({
+            "type": "lane_pulse", "start": round(pulse_time * 1000),
+            "duration": 3600,
+            "parameters": (f"target={lane},color={lane_colors[lane]},"
+                           "brightness=0.18,rate=1.5,pattern=solid"),
+        })
+    return effects
+
+
 def apply_wind_and_columns(notes: list[dict], gusts: list[tuple[int, int]]) -> None:
     for index, note in enumerate(notes):
         upper_start = max(0, note["hit"] - NOTE_TRAVEL_MS)
         safe_entry = max(0, note["hit"] - SAFE_ZONE_LEAD_MS)
-        for gust_start, duration in gusts:
+        for gimmick_id, (gust_start, duration) in enumerate(gusts, start=1):
             if upper_start < gust_start + duration and safe_entry > gust_start:
                 lane = note["lane"]
                 shift = 1 if lane == 0 else -1 if lane == 2 else (
@@ -207,6 +287,7 @@ def apply_wind_and_columns(notes: list[dict], gusts: list[tuple[int, int]]) -> N
                 note["end_col"] = max(0, min(2, lane + shift))
                 note["shift_start"] = max(upper_start, gust_start)
                 note["shift_end"] = min(safe_entry, gust_start + duration)
+                note["gimmick_id"] = gimmick_id
                 break
 
     occupied_until = [0, 0, 0]
@@ -217,9 +298,10 @@ def apply_wind_and_columns(notes: list[dict], gusts: list[tuple[int, int]]) -> N
             choices.extend((desired - distance, desired + distance))
         chosen = next((column for column in choices if 0 <= column < 3 and
                        note["hit"] > occupied_until[column]), desired)
-        if note["shift_end"] == 0:
-            note["start_col"] = chosen
-        note["end_col"] = chosen
+        if note["shift_end"] > 0:
+            note["end_col"] = chosen
+        else:
+            chosen = note["lane"]
         occupied_until[chosen] = note["hit"] + note["hold"]
 
 
@@ -232,28 +314,74 @@ def action(lane: int, variant: bool) -> str:
 
 
 def write_chart(destination: Path, notes: list[dict], gusts: list[tuple[int, int]],
-                duration: float, bpm: float, *, title: str, artist: str,
+                visual_gimmicks: list[dict], duration: float, bpm: float,
+                *, title: str, artist: str,
                 slug: str, difficulty: int, color: str,
                 audio_start: int) -> None:
     lines = [
         "# Beat/onset/spectrum analysis generated by tools/import_song.py",
-        "version=BOP1", f"title={title}", f"artist={artist}",
+        f"title={title}", f"artist={artist}",
         f"bpm={round(bpm)}", f"difficulty={difficulty}", f"color=#{color}",
         f"audio=/songs/{slug}.wav", f"cover=/songs/{slug}.rgb888",
         f"audio_start={audio_start}", "audio_loop=0",
         f"duration={round(duration * 1000)}", "",
     ]
-    lines.extend(f"wind={start},{length}" for start, length in gusts)
-    lines.append("")
+    for note_id, note in enumerate(notes, start=1):
+        note["id"] = note_id
+    gimmicks: list[dict] = []
+    for gimmick_id, (start, length) in enumerate(gusts, start=1):
+        gimmicks.append({
+            "wind_index": gimmick_id, "type": "wind", "start": start,
+            "duration": length,
+            "parameters": ("target=all,color=35:130:180,brightness=1.0,"
+                           "direction=right,speed=1.0,density=4"),
+        })
+    for gimmick in visual_gimmicks:
+        gimmicks.append(dict(gimmick))
+    gimmicks.sort(key=lambda gimmick: gimmick["start"])
+    for gimmick_id, gimmick in enumerate(gimmicks, start=1):
+        gimmick["id"] = gimmick_id
+    wind_ids = {gimmick["wind_index"]: gimmick["id"] for gimmick in gimmicks
+                if "wind_index" in gimmick}
+
+    event_blocks: list[tuple[int, int, list[str], bool]] = []
+    for gimmick in gimmicks:
+        event_blocks.append((
+            gimmick["start"], 0,
+            [f"gimmick={gimmick['id']},{gimmick['type']},"
+             f"{gimmick['start']},{gimmick['duration']},"
+             f"{gimmick['parameters']}"], True,
+        ))
     for note in notes:
         end = (action(note["lane"], note["end_variant"])
                if note["end_variant"] != note["variant"] else "same")
-        lines.append(
-            f"note={note['hit']},{('twist','push','pull')[note['lane']]},"
-            f"{action(note['lane'], note['variant'])},{note['hold']},{end},"
-            f"{note['transition']},{int(note['bonus'])},{note['start_col']},"
-            f"{note['end_col']},{note['shift_start']},{note['shift_end']}"
-        )
+        fields = [str(note["hit"]),
+                  ("twist", "push", "pull")[note["lane"]],
+                  action(note["lane"], note["variant"])]
+        if note["hold"] or end != "same" or note["transition"] or note["bonus"]:
+            fields.extend((str(note["hold"]), end,
+                           str(note["transition"]), str(int(note["bonus"]))))
+        block: list[str] = []
+        if note["gimmick_id"]:
+            gust_start = gusts[note["gimmick_id"] - 1][0]
+            block.append(
+                f"gimmick_note={wind_ids[note['gimmick_id']]},"
+                f"{note['id']},column,"
+                f"{note['end_col']},{note['shift_start'] - gust_start},"
+                f"{note['shift_end'] - gust_start}"
+            )
+        block.append("note=" + ",".join(fields))
+        event_blocks.append((note["hit"], 1, block,
+                             bool(note["gimmick_id"])))
+
+    for _, _, block, separated in sorted(event_blocks):
+        if separated and lines[-1] != "":
+            lines.append("")
+        lines.extend(block)
+        if separated:
+            lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
     destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -360,12 +488,13 @@ def main() -> None:
     notes = contextual_notes(features, duration, bpm, phase)
     gusts = section_gusts(features, duration)
     apply_wind_and_columns(notes, gusts)
+    visual_gimmicks = contextual_visual_gimmicks(features, duration, gusts)
     cover_path = args.output / f"{slug}.rgb888"
     audio_path = args.output / f"{slug}.wav"
     chart_path = args.output / f"{slug}.bop"
     convert_cover(args.cover, cover_path)
     convert_audio(args.source, audio_path)
-    write_chart(chart_path, notes, gusts, duration, bpm,
+    write_chart(chart_path, notes, gusts, visual_gimmicks, duration, bpm,
                 title=args.title, artist=args.artist, slug=slug,
                 difficulty=args.difficulty, color=color,
                 audio_start=args.audio_start)

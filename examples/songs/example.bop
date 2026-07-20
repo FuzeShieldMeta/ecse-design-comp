@@ -1,5 +1,4 @@
-# BOP Rhythm external chart format, version 1
-version=BOP1
+# BOP Rhythm external chart format
 title=EXAMPLE SONG
 artist=YOUR NAME
 bpm=120
@@ -11,16 +10,23 @@ audio_start=0
 audio_loop=0
 duration=12000
 
-# note=hit_ms,lane,action,hold_ms,end_action,transition_ms,bonus,
-#      start_column,end_column,shift_start_ms,shift_end_ms
-note=2000,twist,left,0,same,0,0
-note=2500,push,tap,0,same,0,0
-note=3000,pull,half,0,same,0,0
-note=3500,pull,full,0,same,0,0
+# Notes receive implicit IDs 1, 2, 3... in file order.
+# note=hit_ms,lane,action[,hold_ms,end_action,transition_ms,bonus]
+note=2000,twist,left
+note=2500,push,tap
+note=3000,pull,half
+note=3500,pull,full
+
+gimmick=1,screen_flash,4000,900,target=all,color=255:208:96,brightness=0.28,rate=4.0,pattern=checker
+
 note=4500,twist,right,1000,same,0,0
 note=6000,pull,half,1600,full,800,0
+
+gimmick=2,lane_pulse,7000,1800,target=pull,color=64:96:255,brightness=0.20,rate=2.0,pattern=solid
+
 note=8000,pull,full,1600,half,800,1
 
-# A wind visual and an explicitly timed move from column 0 to column 1.
-wind=9000,1800
-note=10500,twist,left,0,same,0,0,0,1,9000,10000
+# Gimmick note timings are offsets from the referenced gimmick's start.
+gimmick=3,wind,9000,1800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
+gimmick_note=3,8,column,1,0,1000
+note=10500,twist,left

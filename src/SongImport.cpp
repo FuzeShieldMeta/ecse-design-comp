@@ -62,10 +62,78 @@ bool parseVariant(uint8_t lane, const String &text, bool &variant) {
   return true;
 }
 
+bool parseGimmickType(const String &text, GimmickType &type) {
+  if (text.equalsIgnoreCase("wind")) type = GimmickType::Wind;
+  else if (text.equalsIgnoreCase("screen_flash"))
+    type = GimmickType::ScreenFlash;
+  else if (text.equalsIgnoreCase("lane_pulse"))
+    type = GimmickType::LanePulse;
+  else return false;
+  return true;
+}
+
+bool parseGimmickTarget(const String &text, int8_t &target) {
+  if (text.isEmpty() || text.equalsIgnoreCase("all")) {
+    target = -1;
+    return true;
+  }
+  uint8_t lane = 0;
+  if (parseLane(text, lane)) {
+    target = static_cast<int8_t>(lane);
+    return true;
+  }
+  if (text.length() == 1 && text[0] >= '0' && text[0] <= '2') {
+    target = static_cast<int8_t>(text[0] - '0');
+    return true;
+  }
+  return false;
+}
+
+bool parseRgbColor(const String &text, uint32_t &color) {
+  const int firstSeparator = text.indexOf(':');
+  const int secondSeparator = text.indexOf(':', firstSeparator + 1);
+  if (firstSeparator <= 0 || secondSeparator <= firstSeparator + 1 ||
+      text.indexOf(':', secondSeparator + 1) >= 0) return false;
+  String channels[3] = {
+    text.substring(0, firstSeparator),
+    text.substring(firstSeparator + 1, secondSeparator),
+    text.substring(secondSeparator + 1)
+  };
+  uint8_t parsed[3]{};
+  for (size_t i = 0; i < 3; ++i) {
+    channels[i].trim();
+    const long value = channels[i].toInt();
+    if (value < 0 || value > 255 || String(value) != channels[i]) return false;
+    parsed[i] = static_cast<uint8_t>(value);
+  }
+  color = (static_cast<uint32_t>(parsed[0]) << 16) |
+          (static_cast<uint32_t>(parsed[1]) << 8) | parsed[2];
+  return true;
+}
+
+bool parseFloatParameter(const String &text, float minimum, float maximum,
+                         float &value) {
+  char *end = nullptr;
+  const float parsed = strtof(text.c_str(), &end);
+  if (end == text.c_str() || *end != '\0' || !isfinite(parsed) ||
+      parsed < minimum || parsed > maximum) return false;
+  value = parsed;
+  return true;
+}
+
+bool parsePattern(const String &text, GimmickPattern &pattern) {
+  if (text.equalsIgnoreCase("solid")) pattern = GimmickPattern::Solid;
+  else if (text.equalsIgnoreCase("stripes"))
+    pattern = GimmickPattern::Stripes;
+  else if (text.equalsIgnoreCase("checker"))
+    pattern = GimmickPattern::Checker;
+  else return false;
+  return true;
+}
+
 bool readMetadata(const char *path, Song &out) {
   File file = LittleFS.open(path, "r");
   if (!file) return false;
-  bool versionSupported = false;
 
   strlcpy(out.title, "UNTITLED", sizeof(out.title));
   strlcpy(out.artist, "UNKNOWN", sizeof(out.artist));
@@ -83,9 +151,7 @@ bool readMetadata(const char *path, Song &out) {
     line.trim();
     if (line.isEmpty() || line.startsWith("#")) continue;
     const String value = valueAfterEquals(line);
-    if (line.startsWith("version="))
-      versionSupported = value.equalsIgnoreCase("BOP1");
-    else if (line.startsWith("title="))
+    if (line.startsWith("title="))
       strlcpy(out.title, value.c_str(), sizeof(out.title));
     else if (line.startsWith("artist="))
       strlcpy(out.artist, value.c_str(), sizeof(out.artist));
@@ -107,17 +173,18 @@ bool readMetadata(const char *path, Song &out) {
       out.audioLoop = value.toInt() != 0;
   }
   file.close();
-  return versionSupported;
+  return true;
 }
 
-bool parseNote(const String &value, ChartNote &note) {
-  String field[11];
-  const size_t count = splitCsv(value, field, 11);
-  if (count < 4 || !parseLane(field[1], note.lane)) return false;
+bool parseNote(const String &value, uint16_t generatedId, ChartNote &note) {
+  String field[7];
+  const size_t count = splitCsv(value, field, 7);
+  if (count < 3 || !parseLane(field[1], note.lane)) return false;
   if (!parseVariant(note.lane, field[2], note.variant)) return false;
 
+  note.id = generatedId;
   note.hitMs = max(0L, field[0].toInt());
-  note.holdMs = constrain(field[3].toInt(), 0, 60000);
+  note.holdMs = count > 3 ? constrain(field[3].toInt(), 0, 60000) : 0;
   note.endVariant = note.variant;
   if (count > 4 && !field[4].isEmpty() &&
       !field[4].equalsIgnoreCase("same") &&
@@ -125,24 +192,98 @@ bool parseNote(const String &value, ChartNote &note) {
   note.transitionMs = count > 5
                           ? constrain(field[5].toInt(), 0, note.holdMs) : 0;
   note.bonus = count > 6 && field[6].toInt() != 0;
-  note.startColumn = note.lane;
-  note.endColumn = note.lane;
-  note.shiftStartMs = 0;
-  note.shiftEndMs = 0;
-  if (count > 7 && !field[7].isEmpty())
-    note.startColumn = constrain(field[7].toInt(), 0, 2);
-  if (count > 8 && !field[8].isEmpty())
-    note.endColumn = constrain(field[8].toInt(), 0, 2);
-  if (count > 9) note.shiftStartMs = max(0L, field[9].toInt());
-  if (count > 10) note.shiftEndMs = max(0L, field[10].toInt());
 
   if (note.lane != 2) {
     note.endVariant = note.variant;
     note.transitionMs = 0;
   }
   if (note.transitionMs >= note.holdMs) note.transitionMs = 0;
-  if (note.startColumn != note.endColumn &&
-      note.shiftEndMs <= note.shiftStartMs) return false;
+  return true;
+}
+
+bool parseGimmick(const String &value, ChartGimmick &gimmick) {
+  String field[12];
+  const size_t count = splitCsv(value, field, 12);
+  if (count < 4 || !parseGimmickType(field[1], gimmick.type)) return false;
+  const long parsedId = field[0].toInt();
+  const long parsedStart = field[2].toInt();
+  const long parsedDuration = field[3].toInt();
+  if (parsedId <= 0 || parsedId > 65535 || parsedStart < 0 ||
+      parsedDuration <= 0) return false;
+  gimmick.id = static_cast<uint16_t>(parsedId);
+  gimmick.startMs = static_cast<uint32_t>(parsedStart);
+  gimmick.durationMs = static_cast<uint32_t>(parsedDuration);
+  gimmick.target = -1;
+  gimmick.color = gimmick.type == GimmickType::Wind
+      ? (35UL << 16) | (130UL << 8) | 180UL
+      : gimmick.type == GimmickType::ScreenFlash
+          ? (255UL << 16) | (255UL << 8) | 255UL
+          : (45UL << 16) | (60UL << 8) | 120UL;
+  gimmick.brightness = gimmick.type == GimmickType::Wind ? 1.0f :
+                        gimmick.type == GimmickType::ScreenFlash ? 0.14f :
+                                                                   0.18f;
+  gimmick.rateHz = 0.0f;
+  gimmick.speed = 1.0f;
+  gimmick.direction = 1;
+  gimmick.density = 4;
+  gimmick.pattern = gimmick.type == GimmickType::LanePulse
+                        ? GimmickPattern::Solid
+                        : GimmickPattern::Stripes;
+  for (size_t i = 4; i < count; ++i) {
+    const int separator = field[i].indexOf('=');
+    if (separator <= 0) return false;
+    String key = field[i].substring(0, separator);
+    String parameter = field[i].substring(separator + 1);
+    key.trim();
+    parameter.trim();
+    if (key.equalsIgnoreCase("target")) {
+      if (!parseGimmickTarget(parameter, gimmick.target)) return false;
+    } else if (key.equalsIgnoreCase("color")) {
+      if (!parseRgbColor(parameter, gimmick.color)) return false;
+    } else if (key.equalsIgnoreCase("brightness")) {
+      if (!parseFloatParameter(parameter, 0.0f, 1.0f,
+                               gimmick.brightness)) return false;
+    } else if (key.equalsIgnoreCase("rate")) {
+      if (!parseFloatParameter(parameter, 0.0f, 20.0f,
+                               gimmick.rateHz)) return false;
+    } else if (key.equalsIgnoreCase("speed")) {
+      if (!parseFloatParameter(parameter, 0.25f, 4.0f,
+                               gimmick.speed)) return false;
+    } else if (key.equalsIgnoreCase("direction")) {
+      if (parameter.equalsIgnoreCase("left")) gimmick.direction = -1;
+      else if (parameter.equalsIgnoreCase("right")) gimmick.direction = 1;
+      else return false;
+    } else if (key.equalsIgnoreCase("density")) {
+      const long density = parameter.toInt();
+      if (density < 1 || density > 8 || String(density) != parameter)
+        return false;
+      gimmick.density = static_cast<uint8_t>(density);
+    } else if (key.equalsIgnoreCase("pattern")) {
+      if (!parsePattern(parameter, gimmick.pattern)) return false;
+    } else return false;
+  }
+  return true;
+}
+
+bool parseGimmickNoteEffect(const String &value,
+                            ChartGimmickNoteEffect &effect) {
+  String field[6];
+  if (splitCsv(value, field, 6) != 6 ||
+      !field[2].equalsIgnoreCase("column")) return false;
+  const long gimmickId = field[0].toInt();
+  const long noteId = field[1].toInt();
+  const long targetColumn = field[3].toInt();
+  const long startOffset = field[4].toInt();
+  const long endOffset = field[5].toInt();
+  if (gimmickId <= 0 || gimmickId > 65535 || noteId <= 0 ||
+      noteId > 65535 || targetColumn < 0 || targetColumn > 2 ||
+      startOffset < 0 || startOffset > 65535 ||
+      endOffset <= startOffset || endOffset > 65535) return false;
+  effect.gimmickId = static_cast<uint16_t>(gimmickId);
+  effect.noteId = static_cast<uint16_t>(noteId);
+  effect.targetColumn = static_cast<uint8_t>(targetColumn);
+  effect.startOffsetMs = static_cast<uint16_t>(startOffset);
+  effect.endOffsetMs = static_cast<uint16_t>(endOffset);
   return true;
 }
 
@@ -220,32 +361,63 @@ bool loadChart(size_t index, Chart &out) {
 
   out.noteCount = 0;
   out.gimmickCount = 0;
+  out.gimmickNoteEffectCount = 0;
   out.durationMs = metadata->durationMs;
   uint32_t inferredDuration = 0;
+  bool parseError = false;
   while (file.available()) {
     String line = file.readStringUntil('\n');
     line.trim();
     if (line.isEmpty() || line.startsWith("#")) continue;
-    if (line.startsWith("note=") && out.noteCount < MAX_NOTES) {
+    if (line.startsWith("note=")) {
       ChartNote parsed{};
-      if (parseNote(valueAfterEquals(line), parsed)) {
+      if (out.noteCount < MAX_NOTES &&
+          parseNote(valueAfterEquals(line), out.noteCount + 1, parsed)) {
         out.notes[out.noteCount++] = parsed;
         const uint32_t noteEnd = parsed.hitMs + parsed.holdMs +
                                  static_cast<uint32_t>(1000);
         inferredDuration = max(inferredDuration, noteEnd);
-      }
-    } else if (line.startsWith("wind=") &&
-               out.gimmickCount < MAX_GIMMICKS) {
-      String field[2];
-      if (splitCsv(valueAfterEquals(line), field, 2) == 2) {
-        ChartGimmick &gimmick = out.gimmicks[out.gimmickCount++];
-        gimmick.startMs = max(0L, field[0].toInt());
-        gimmick.durationMs = max(1L, field[1].toInt());
-      }
+      } else parseError = true;
+    } else if (line.startsWith("gimmick=")) {
+      ChartGimmick parsed{};
+      if (out.gimmickCount < MAX_GIMMICKS &&
+          parseGimmick(valueAfterEquals(line), parsed))
+        out.gimmicks[out.gimmickCount++] = parsed;
+      else parseError = true;
+    } else if (line.startsWith("gimmick_note=")) {
+      ChartGimmickNoteEffect parsed{};
+      if (out.gimmickNoteEffectCount < MAX_GIMMICK_NOTE_EFFECTS &&
+          parseGimmickNoteEffect(valueAfterEquals(line), parsed))
+        out.gimmickNoteEffects[out.gimmickNoteEffectCount++] = parsed;
+      else parseError = true;
     }
   }
   file.close();
-  if (out.noteCount == 0) return false;
+  if (parseError || out.noteCount == 0) return false;
+  for (size_t i = 0; i < out.gimmickCount; ++i) {
+    for (size_t j = i + 1; j < out.gimmickCount; ++j)
+      if (out.gimmicks[i].id == out.gimmicks[j].id) return false;
+  }
+  for (size_t i = 0; i < out.gimmickNoteEffectCount; ++i) {
+    const ChartGimmickNoteEffect &effect = out.gimmickNoteEffects[i];
+    const ChartGimmick *gimmick = nullptr;
+    bool noteFound = false;
+    for (size_t j = 0; j < out.gimmickCount; ++j)
+      if (out.gimmicks[j].id == effect.gimmickId) {
+        gimmick = &out.gimmicks[j];
+        break;
+      }
+    for (size_t j = 0; j < out.noteCount; ++j)
+      if (out.notes[j].id == effect.noteId) {
+        noteFound = true;
+        break;
+      }
+    if (gimmick == nullptr || !noteFound ||
+        gimmick->type != GimmickType::Wind ||
+        effect.endOffsetMs > gimmick->durationMs) return false;
+    for (size_t j = i + 1; j < out.gimmickNoteEffectCount; ++j)
+      if (out.gimmickNoteEffects[j].noteId == effect.noteId) return false;
+  }
   if (out.durationMs == 0) out.durationMs = inferredDuration;
   return true;
 }

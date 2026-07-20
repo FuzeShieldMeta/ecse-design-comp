@@ -65,7 +65,7 @@ enum class Gesture : uint8_t { None, TwistLeft, TwistRight, PullHalf, PullFull }
 enum class Judgment : uint8_t { None, Perfect, Good, Miss };
 enum class Screen : uint8_t { Select, Playing, Paused, Results, Failed };
 enum class DisplayProfile : uint8_t { None, Select, Game };
-enum class GimmickType : uint8_t { WindGust };
+enum class GimmickType : uint8_t { WindGust, ScreenFlash, LanePulse };
 enum class PullState : uint8_t { Rest, Half, Full, Fault };
 
 struct NoteDef {
@@ -83,10 +83,18 @@ struct NoteDef {
 };
 
 struct GimmickDef {
+  uint16_t id;
   uint32_t startMs;
   uint32_t durationMs;
   GimmickType type;
-  float amount;
+  int8_t target;
+  uint32_t color;
+  float brightness;
+  float rateHz;
+  float speed;
+  int8_t direction;
+  uint8_t density;
+  BopImport::GimmickPattern pattern;
 };
 
 constexpr size_t MAX_NOTES = 220;
@@ -290,32 +298,50 @@ bool buildImportedChart() {
       source.holdMs,
       source.endVariant,
       source.transitionMs,
-      source.startColumn,
-      source.endColumn,
-      source.shiftStartMs,
-      source.shiftEndMs
+      source.lane,
+      source.lane,
+      0,
+      0
     };
   }
   for (size_t i = 0; i < GIMMICK_COUNT; ++i) gimmicks[i].durationMs = 0;
   const size_t importedGimmicks = min(importedChart.gimmickCount,
                                       GIMMICK_COUNT);
   for (size_t i = 0; i < importedGimmicks; ++i) {
-    gimmicks[i] = {importedChart.gimmicks[i].startMs,
-                   importedChart.gimmicks[i].durationMs,
-                   GimmickType::WindGust, 1.0f};
+    const BopImport::ChartGimmick &source = importedChart.gimmicks[i];
+    const GimmickType type = source.type == BopImport::GimmickType::Wind
+        ? GimmickType::WindGust
+        : source.type == BopImport::GimmickType::ScreenFlash
+            ? GimmickType::ScreenFlash : GimmickType::LanePulse;
+    gimmicks[i] = {source.id, source.startMs, source.durationMs, type,
+                   source.target, source.color, source.brightness,
+                   source.rateHz, source.speed, source.direction,
+                   source.density, source.pattern};
+  }
+  for (size_t effectIndex = 0;
+       effectIndex < importedChart.gimmickNoteEffectCount; ++effectIndex) {
+    const BopImport::ChartGimmickNoteEffect &effect =
+        importedChart.gimmickNoteEffects[effectIndex];
+    const BopImport::ChartGimmick *sourceGimmick = nullptr;
+    for (size_t i = 0; i < importedGimmicks; ++i) {
+      if (importedChart.gimmicks[i].id == effect.gimmickId) {
+        sourceGimmick = &importedChart.gimmicks[i];
+        break;
+      }
+    }
+    if (sourceGimmick == nullptr) continue;
+    for (size_t noteIndex = 0; noteIndex < noteCount; ++noteIndex) {
+      if (importedChart.notes[noteIndex].id != effect.noteId) continue;
+      chart[noteIndex].endColumn = effect.targetColumn;
+      chart[noteIndex].shiftStartMs = sourceGimmick->startMs +
+                                      effect.startOffsetMs;
+      chart[noteIndex].shiftEndMs = sourceGimmick->startMs +
+                                    effect.endOffsetMs;
+      break;
+    }
   }
   songDurationMs = importedChart.durationMs;
   return true;
-}
-
-bool gimmickActive(GimmickType type, uint32_t t, float *amount = nullptr) {
-  for (const GimmickDef &g : gimmicks) {
-    if (g.type == type && t >= g.startMs && t < g.startMs + g.durationMs) {
-      if (amount != nullptr) *amount = g.amount;
-      return true;
-    }
-  }
-  return false;
 }
 
 void buildChart() {
@@ -1127,13 +1153,60 @@ void drawNote(const NoteDef &note, int x, float y) {
 }
 
 void drawGimmickEffect(uint32_t now, uint32_t t) {
-  if (gimmickActive(GimmickType::WindGust, t)) {
-    // Moving, slightly angled streaks are the only wind telegraph.
-    for (int y = 8; y < GIMMICK_SAFE_ZONE_Y; y += 5) {
-      const int x = (now / 5 + y * 7) % 76 - 10;
-      // Avoid negative/off-panel coordinates in the virtual mapper.
-      if (x >= 0 && x + 9 < 64)
-        display->drawLine(x, y + 1, x + 9, y, rgb(35, 130, 180));
+  for (const GimmickDef &gimmick : gimmicks) {
+    if (gimmick.durationMs == 0 || t < gimmick.startMs ||
+        t >= gimmick.startMs + gimmick.durationMs) continue;
+    const uint32_t elapsedMs = t - gimmick.startMs;
+    const float progress = static_cast<float>(elapsedMs) / gimmick.durationMs;
+    const float envelope = gimmick.rateHz > 0.0f
+        ? 0.5f - 0.5f * cosf(2.0f * PI * elapsedMs * 0.001f * gimmick.rateHz)
+        : 1.0f - fabsf(progress * 2.0f - 1.0f);
+    const float strength = gimmick.type == GimmickType::WindGust
+                               ? gimmick.brightness
+                               : gimmick.brightness * envelope;
+    const uint8_t red = static_cast<uint8_t>(
+        ((gimmick.color >> 16) & 0xFF) * strength);
+    const uint8_t green = static_cast<uint8_t>(
+        ((gimmick.color >> 8) & 0xFF) * strength);
+    const uint8_t blue = static_cast<uint8_t>(
+        (gimmick.color & 0xFF) * strength);
+    const uint16_t effectColor = rgb(red, green, blue);
+    if (gimmick.type == GimmickType::WindGust) {
+      for (uint8_t streak = 0; streak < gimmick.density; ++streak) {
+        const int y = 8 + streak * (GIMMICK_SAFE_ZONE_Y - 9) /
+                            gimmick.density;
+        const int travel = static_cast<int>(now * gimmick.speed / 5.0f +
+                                             y * 7) % 76;
+        const int x = gimmick.direction < 0 ? 64 - travel : travel - 10;
+        if (x >= 0 && x + 9 < 64)
+          display->drawLine(x, y + 1, x + 9, y, effectColor);
+      }
+      continue;
+    }
+
+    const int firstLane = gimmick.target < 0 ? 0 : gimmick.target;
+    const int lastLane = gimmick.target < 0 ? 2 : gimmick.target;
+    for (int lane = firstLane; lane <= lastLane; ++lane) {
+      const int x = gimmick.type == GimmickType::ScreenFlash &&
+                            gimmick.target < 0
+                        ? 0 : 2 + lane * 20;
+      const int width = gimmick.type == GimmickType::ScreenFlash &&
+                                gimmick.target < 0
+                            ? 64 : 19;
+      if (gimmick.pattern == BopImport::GimmickPattern::Solid) {
+        display->fillRect(x, 1, width, 63, effectColor);
+      } else if (gimmick.pattern == BopImport::GimmickPattern::Stripes) {
+        for (int y = 2; y < 64; y += 3)
+          display->drawFastHLine(x, y, width, effectColor);
+      } else {
+        for (int y = 2; y < 64; y += 4)
+          for (int pixelX = x + ((y / 4) & 1) * 2;
+               pixelX < x + width; pixelX += 4)
+            display->fillRect(pixelX, y, min(2, x + width - pixelX), 2,
+                              effectColor);
+      }
+      if (gimmick.type == GimmickType::ScreenFlash && gimmick.target < 0)
+        break;
     }
   }
 }
@@ -1145,11 +1218,10 @@ void drawPlaying(uint32_t now) {
                                         : micros() - runStartedAtUs;
   const float preciseTimeMs = preciseElapsedUs * 0.001f;
   display->fillScreen(0);
+  drawGimmickEffect(now, t);
   // Extend the two internal column separators to the top edge.
   for (int x : {21, 41})
     display->drawFastVLine(x, 0, NOTE_HIT_Y + 1, rgb(45, 45, 45));
-
-  drawGimmickEffect(now, t);
 
   // Draw the lane-specific timing segments before notes so approaching notes
   // remain visible as they cross the line. These colours deliberately avoid
@@ -1371,7 +1443,7 @@ bool allocateDisplayBuffers(uint8_t colorDepth) {
     return false;
   }
   newVirtual->setDisplay(*newDma);
-  newDma->setBrightness8(50);
+  newDma->setBrightness8(90);
   newVirtual->clearScreen();
 
   dmaDisplay = newDma;

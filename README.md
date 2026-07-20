@@ -173,10 +173,11 @@ to be common for the signals used here.
 All songs are loaded from the ESP32's LittleFS partition. There are no
 firmware-compiled songs: if the filesystem is missing or contains no valid
 charts, the display shows `NO SONG FILES` instead of starting an empty game.
-The importer supports up to eight external songs and 220 notes per chart.
+The importer supports up to eight external songs, 220 notes, 24 gimmicks, and
+128 gimmick-to-note effects per chart.
 
 The former `TEST GRID`, `SYNC STEP`, and `PULL RUSH` demonstrations are now
-ordinary imported `BOP1` charts with accompanying loopable mono WAV files in
+ordinary imported charts with accompanying loopable mono WAV files in
 `data/songs/`. Their source generator is `tools/generate_demo_assets.py`; run it
 after intentionally changing those generated charts or sounds:
 
@@ -206,12 +207,12 @@ found, chart-load failures, and unsupported WAV files.
 
 ### Chart format
 
-Charts are UTF-8 text files using the `BOP1` format. A complete template is
+Charts are UTF-8 text files using the BOP chart format. It has no version
+field; its record types are validated when the chart is loaded. A complete template is
 provided in `examples/songs/example.bop`; it is kept outside `data/` so it is
 not copied into the device filesystem.
 
 ```text
-version=BOP1
 title=EXAMPLE SONG
 artist=YOUR NAME
 bpm=120
@@ -239,11 +240,14 @@ duration=12000
 Each note uses this comma-separated layout:
 
 ```text
-note=hit_ms,lane,action,hold_ms,end_action,transition_ms,bonus,start_column,end_column,shift_start_ms,shift_end_ms
+note=hit_ms,lane,action[,hold_ms,end_action,transition_ms,bonus]
 ```
 
-The first four fields are required. Remaining fields may be omitted from the
-right.
+The first three fields are required. Optional hold fields are omitted entirely
+for ordinary notes. Notes receive automatic 1-based IDs in file order: the
+first `note=` line is note 1, the second is note 2, and so on. Gimmicks use
+these generated IDs, so rearranging note lines requires updating their
+`gimmick_note` references.
 
 | Field | Accepted values |
 |---|---|
@@ -255,35 +259,104 @@ right.
 | `end_action` | `same`, `half`, or `full`; pull holds only |
 | `transition_ms` | Offset from the start of a pull hold where its state changes |
 | `bonus` | `0` or `1` |
-| Columns | `0` left, `1` centre, `2` right |
-| Shift times | Song times in milliseconds; required when columns differ |
 
 Examples:
 
 ```text
-note=2000,twist,left,0,same,0,0
-note=3000,pull,half,0,same,0,0
+note=2000,twist,left
+note=3000,pull,half
 note=5000,pull,half,1600,full,800,0
 note=8000,pull,full,1600,half,800,1
-note=10500,twist,left,0,same,0,0,0,1,9000,10000
 ```
 
-The logical `lane` always determines which physical control hits the note.
-Display columns are independent: changing columns moves the note visually but
-does not change its required control. Column movement is interpolated only
-between `shift_start_ms` and `shift_end_ms`; outside that window the note sits
-on one of the three exact column centres.
+The logical `lane` determines both the physical control and default display
+column. Notes no longer carry redundant start/end columns or absolute shift
+times. Any temporary change is owned by a referenced gimmick.
 
-Wind streaks are declared separately:
+Typed gimmicks use this layout:
 
 ```text
-wind=9000,1800
+gimmick=id,type,start_ms,duration_ms[,key=value...]
 ```
 
-This line creates the visual gust beginning at 9000 ms for 1800 ms. Note moves
-are authored explicitly with their column and shift fields, allowing charts to
-control exactly which notes the gust affects. Shift windows should finish
-before affected notes enter the protected lower 60% of the screen.
+Gimmick IDs remain explicit because note effects refer to them. IDs must be
+unique positive integers. Optional named parameters may appear in any order:
+
+| Parameter | Values and behavior |
+|---|---|
+| `target` | `all`, `twist`, `push`, `pull`, or display column `0`–`2` |
+| `color` | Decimal `R:G:B`, with each channel from `0`–`255`, such as `255:128:64` |
+| `brightness` | `0.0`–`1.0`, multiplied into the selected colour |
+| `rate` | Flash/pulse effects: `0.0`–`20.0` pulses per second; zero produces one fade-in/fade-out envelope over the full duration |
+| `pattern` | Flash/pulse effects: `solid`, `stripes`, or `checker` |
+| `direction` | Wind only: `left` or `right` |
+| `speed` | Wind only: `0.25`–`4.0` movement multiplier |
+| `density` | Wind only: `1`–`8` simultaneous streak rows |
+
+Wind `speed` controls only how quickly the visible streaks cross the matrix:
+`0.5` is half speed, `1.0` is the default, and `2.0` is twice as fast. It does
+not alter the song tempo, note descent, hit time, or column-shift duration.
+Wind `density` is the number of streak rows distributed through the upper
+gimmick region. Increasing it makes the gust look fuller but does not move
+additional notes. Which notes move, where they move, and for how long remain
+defined exclusively by the associated `gimmick_note` records. `direction`
+also controls the streak animation only; chart authors should choose matching
+target columns when they want every moved note to follow the visual direction.
+
+Parameters not supplied use type-specific defaults:
+
+| Type | Default colour | Brightness | Pattern | Additional defaults |
+|---|---|---:|---|---|
+| `wind` | `35:130:180` | `1.0` | `stripes` | right, speed `1.0`, density `4` |
+| `screen_flash` | `255:255:255` | `0.14` | `stripes` | target `all`, rate `0` |
+| `lane_pulse` | `45:60:120` | `0.18` | `solid` | target `all`, rate `0` |
+
+The current renderer supports:
+
+| Type | Effect |
+|---|---|
+| `wind` | Animated gust streaks with configurable colour, direction, speed, and density |
+| `screen_flash` | A configurable colour/pattern pulse across the entire screen or selected lane |
+| `lane_pulse` | A configurable full-height pulse behind one lane or all three lanes |
+
+Examples with additional parameters:
+
+```text
+gimmick=2,screen_flash,16000,1200,target=all,color=255:208:96,brightness=0.30,rate=4.0,pattern=checker
+gimmick=3,lane_pulse,22000,2400,target=pull,color=150:60:255,brightness=0.24,rate=2.0,pattern=solid
+```
+
+Both effects are visual-only and are rendered behind notes, timing bars,
+separators, and the health bar. They may cover the full matrix because they do
+not alter note positions or input mappings. The protected lower 60% restriction
+continues to apply to note-changing effects such as wind column movement.
+
+A gimmick changes a particular note by referring to its ID:
+
+```text
+gimmick_note=gimmick_id,note_id,column,target_column,start_offset_ms,end_offset_ms
+```
+
+For example:
+
+```text
+gimmick=1,wind,9000,1800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
+gimmick_note=1,5,column,1,0,1000
+note=10500,twist,left
+```
+
+This gust starts at 9000 ms. Note 5 moves from its default twist column to
+column 1 between offsets 0 and 1000 ms, equivalent to song times 9000–10000 ms.
+It still requires the twist-left control. Effect offsets must remain inside the
+referenced gimmick duration and should finish before the note enters the
+protected lower 60% of the screen. The firmware validates IDs and resolves all
+references once when loading the chart. In this example the twist note must be
+the fifth `note=` record in the file.
+
+Chart event records may be interleaved with notes. Generated charts are written
+in chronological order: a gimmick declaration appears where it begins, and a
+`gimmick_note` line is placed directly above the `note=` record it modifies.
+Only `note=` records increment the automatic note ID.
 
 ### Cover art
 
@@ -305,6 +378,14 @@ six-bit selection buffer and reports that decision through Serial.
 The selection screen presents completed buffers at 30 FPS while the HUB75 DMA
 scan continues at its calculated hardware refresh rate. Gameplay retains its
 faster profile-specific presentation interval.
+
+Both display profiles currently call `setBrightness8(90)`. This is 90 on the
+library's 0–255 scale, approximately 35.3% of its maximum setting rather than
+90%. A gimmick's `brightness` parameter scales its RGB colour before that
+global limit is applied. Revenge's `0.26` and `0.24` flashes therefore peak at
+about 9.2% and 8.5% of the library's unbounded full-channel duty, while its
+`0.18` lane pulses peak at about 6.4%, before panel and perceptual
+nonlinearities.
 
 When selection has to use its six-bit fallback, cover rendering applies a
 stable 4×4 spatial dither to the two RGB888 bits below the physical DMA level.
@@ -381,8 +462,12 @@ files for inspection without registering them.
 
 The generator estimates tempo and beat phase, detects strong offbeats and
 sustained passages, maps low/mid/high spectral emphasis to pull/push/twist, and
-places wind gusts at major energy changes. It requires Python 3, NumPy, and
-FFmpeg.
+places wind gusts at major energy changes. It selects multiple well-separated
+screen flashes from strong isolated onsets and lane pulses from separate
+sustained high-energy sections; the dominant low/mid/high band selects
+pull/push/twist for each pulse. Revenge therefore flashes near 22.48 and 38.98
+seconds and pulses the twist lane near 53.92 and 69.89 seconds rather than using
+arbitrary intervals. It requires Python 3, NumPy, and FFmpeg.
 
 ## Startup self-test
 

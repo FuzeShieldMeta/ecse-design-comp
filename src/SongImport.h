@@ -7,7 +7,8 @@ namespace BopImport {
 
 constexpr size_t MAX_SONGS = 8;
 constexpr size_t MAX_NOTES = 220;
-constexpr size_t MAX_GIMMICKS = 8;
+constexpr size_t MAX_GIMMICKS = 24;
+constexpr size_t MAX_GIMMICK_NOTE_EFFECTS = 128;
 constexpr size_t WAV_BLOCK_FRAMES = 128;
 constexpr size_t COVER_WIDTH = 36;
 constexpr size_t COVER_HEIGHT = 36;
@@ -29,6 +30,7 @@ struct Song {
 };
 
 struct ChartNote {
+  uint16_t id;
   uint32_t hitMs;
   uint8_t lane;       // 0=twist, 1=push, 2=pull
   bool variant;       // twist right / pull full
@@ -36,22 +38,50 @@ struct ChartNote {
   uint16_t holdMs;
   bool endVariant;
   uint16_t transitionMs;
-  uint8_t startColumn;
-  uint8_t endColumn;
-  uint32_t shiftStartMs;
-  uint32_t shiftEndMs;
+};
+
+enum class GimmickType : uint8_t {
+  Wind,
+  ScreenFlash,
+  LanePulse,
+};
+
+enum class GimmickPattern : uint8_t {
+  Solid,
+  Stripes,
+  Checker,
 };
 
 struct ChartGimmick {
+  uint16_t id;
+  GimmickType type;
   uint32_t startMs;
   uint32_t durationMs;
+  int8_t target;  // -1=all, otherwise display lane 0..2.
+  uint32_t color;
+  float brightness;
+  float rateHz;
+  float speed;
+  int8_t direction;
+  uint8_t density;
+  GimmickPattern pattern;
+};
+
+struct ChartGimmickNoteEffect {
+  uint16_t gimmickId;
+  uint16_t noteId;
+  uint8_t targetColumn;
+  uint16_t startOffsetMs;
+  uint16_t endOffsetMs;
 };
 
 struct Chart {
   ChartNote notes[MAX_NOTES];
   ChartGimmick gimmicks[MAX_GIMMICKS];
+  ChartGimmickNoteEffect gimmickNoteEffects[MAX_GIMMICK_NOTE_EFFECTS];
   size_t noteCount;
   size_t gimmickCount;
+  size_t gimmickNoteEffectCount;
   uint32_t durationMs;
 };
 
