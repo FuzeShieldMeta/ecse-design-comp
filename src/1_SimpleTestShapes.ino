@@ -79,6 +79,8 @@ struct NoteDef {
   bool variant;  // left/right for twist, half/full for pull
   bool bonus;
   uint16_t holdMs;
+  bool endVariant;  // Pull state after an optional in-hold transition.
+  uint16_t pullTransitionMs;
   uint8_t startColumn;
   uint8_t endColumn;
   uint32_t shiftStartMs;
@@ -286,6 +288,7 @@ void buildChart() {
   noteCount = 0;
   uint8_t twistNoteNumber = 0;
   uint8_t pullNoteNumber = 0;
+  uint8_t pullTransitionNumber = 0;
 
   for (uint16_t step = 0; step < totalSteps && noteCount < MAX_NOTES; step += 2) {
     const Lane lane = static_cast<Lane>((step / 2 + step / 16 + selectedSong) % 3);
@@ -297,12 +300,26 @@ void buildChart() {
       ++pullNoteNumber;
       longHold = pullNoteNumber % 6 == 4;
     }
+    const uint16_t holdMs = longHold ? stepMs * 3 : 0;
+    bool variant = static_cast<bool>(((step / 2) + selectedSong) & 1);
+    bool endVariant = variant;
+    uint16_t pullTransitionMs = 0;
+    if (lane == Lane::Pull && longHold) {
+      // Alternate examples guarantee both half-to-full and full-to-half
+      // transitions are represented in every sufficiently long chart.
+      variant = static_cast<bool>(pullTransitionNumber & 1);
+      endVariant = !variant;
+      pullTransitionMs = holdMs / 2;
+      ++pullTransitionNumber;
+    }
     chart[noteCount++] = {
       2000UL + step * stepMs,
       lane,
-      static_cast<bool>(((step / 2) + selectedSong) & 1),
+      variant,
       static_cast<bool>(step >= totalSteps * 3 / 4),
-      static_cast<uint16_t>(longHold ? stepMs * 3 : 0),
+      holdMs,
+      endVariant,
+      pullTransitionMs,
       static_cast<uint8_t>(lane),
       static_cast<uint8_t>(lane),
       0,
@@ -313,6 +330,7 @@ void buildChart() {
       const Lane second = static_cast<Lane>((static_cast<uint8_t>(lane) + 1) % 3);
       chart[noteCount++] = {2000UL + step * stepMs, second,
                             static_cast<bool>((step / 8) & 1), true, 0,
+                            static_cast<bool>((step / 8) & 1), 0,
                             static_cast<uint8_t>(second),
                             static_cast<uint8_t>(second), 0, 0};
     }
@@ -727,12 +745,26 @@ void handleAction(Lane physicalLane, Gesture gesture, uint32_t t) {
   }
 }
 
-bool requiredHoldActive(const NoteDef &note) {
+bool requiredHoldActive(const NoteDef &note, uint32_t t) {
   if (note.lane == Lane::Twist)
     return note.variant ? twistRight.stable : twistLeft.stable;
-  if (note.lane == Lane::Pull)
-    return note.variant ? readPullState() == PullState::Full
-                        : readPullState() == PullState::Half;
+  if (note.lane == Lane::Pull) {
+    const PullState state = readPullState();
+    if (note.pullTransitionMs > 0) {
+      const uint32_t transitionAt = note.hitMs + note.pullTransitionMs;
+      const uint32_t transitionDelta = abs(static_cast<int32_t>(t - transitionAt));
+      // Either deliberate pull position is accepted around the state-change
+      // marker, giving the player the same timing tolerance as a normal hit.
+      if (transitionDelta <= goodWindow())
+        return state == PullState::Half || state == PullState::Full;
+      const bool requiresFull = t < transitionAt
+                                    ? note.variant : note.endVariant;
+      return requiresFull ? state == PullState::Full
+                          : state == PullState::Half;
+    }
+    return note.variant ? state == PullState::Full
+                        : state == PullState::Half;
+  }
   return pushInput.stable;
 }
 
@@ -747,7 +779,7 @@ void updateHolds(uint32_t t) {
       noteVisibleUntilMs[i] = chart[i].hitMs + chart[i].holdMs +
                               POST_HIT_DISPLAY_MS;
       judge(holdStartJudgment[i], chart[i].lane, chart[i].bonus);
-    } else if (!requiredHoldActive(chart[i])) {
+    } else if (!requiredHoldActive(chart[i], t)) {
       holding[i] = false;
       resolved[i] = true;
       judge(Judgment::Miss, chart[i].lane);
@@ -963,6 +995,50 @@ void drawInterpolatedRow(int x, int y, int width, Lane lane, float brightness) {
   display->drawFastHLine(x, y, width, noteColor(lane, brightness));
 }
 
+void drawPullRow(int leftX, int y, bool fullPull, float coverage) {
+  if (coverage <= 0.01f) return;
+  if (fullPull) {
+    display->drawFastHLine(leftX, y, NOTE_WIDTH,
+                           noteColor(Lane::Pull, coverage));
+    return;
+  }
+
+  // Interpolate symmetrically from a dark violet centre to the normal bright
+  // pull blue at both edges. Every horizontal pixel is one gradient step.
+  constexpr float CENTER_RED = 22.0f;
+  constexpr float CENTER_GREEN = 0.0f;
+  constexpr float CENTER_BLUE = 24.0f;
+  constexpr float EDGE_RED = 0.0f;
+  constexpr float EDGE_GREEN = 80.0f;
+  constexpr float EDGE_BLUE = 255.0f;
+  constexpr float PURPLE_CORE_RADIUS = 0.30f;
+  constexpr int centerPixel = NOTE_WIDTH / 2;
+  for (int pixel = 0; pixel < NOTE_WIDTH; ++pixel) {
+    const float distance = abs(pixel - centerPixel) /
+                           static_cast<float>(centerPixel);
+    // Keep a wider violet centre, then ease into blue without a hard edge.
+    float blend = constrain((distance - PURPLE_CORE_RADIUS) /
+                                (1.0f - PURPLE_CORE_RADIUS),
+                            0.0f, 1.0f);
+    blend = blend * blend * (3.0f - 2.0f * blend);
+    const float red = CENTER_RED + (EDGE_RED - CENTER_RED) * blend;
+    const float green = CENTER_GREEN +
+                        (EDGE_GREEN - CENTER_GREEN) * blend;
+    const float blue = CENTER_BLUE + (EDGE_BLUE - CENTER_BLUE) * blend;
+    display->drawPixel(
+        leftX + pixel, y,
+        rgb(static_cast<uint8_t>(red * coverage),
+            static_cast<uint8_t>(green * coverage),
+            static_cast<uint8_t>(blue * coverage)));
+  }
+}
+
+void drawPullTrail(int centerX, int top, int bottom, bool fullPull) {
+  if (bottom < top) return;
+  for (int row = top; row <= bottom; ++row)
+    drawPullRow(centerX - NOTE_WIDTH / 2, row, fullPull, 1.0f);
+}
+
 void drawTwistRow(int x, int y, int width, bool requiredSide,
                   float coverage) {
   if (coverage <= 0.01f) return;
@@ -1020,12 +1096,23 @@ void drawNote(const NoteDef &note, int x, float y) {
 
   // The two-pixel bar is blended across adjacent rows according to its
   // fractional vertical position, producing smoother apparent movement.
-  if (note.lane != Lane::Twist) {
+  if (note.lane == Lane::Push) {
     drawInterpolatedRow(x - 5, baseY - 2, NOTE_WIDTH, note.lane, backwardGlow);
     drawInterpolatedRow(x - 5, baseY - 1, NOTE_WIDTH, note.lane, upperBlend);
     drawInterpolatedRow(x - 5, baseY, NOTE_WIDTH, note.lane, 1.0f);
     drawInterpolatedRow(x - 5, baseY + 1, NOTE_WIDTH, note.lane, lowerBlend);
     drawInterpolatedRow(x - 5, baseY + 2, NOTE_WIDTH, note.lane, forwardGlow);
+    return;
+  }
+  if (note.lane == Lane::Pull) {
+    for (int rowOffset = -2; rowOffset <= 2; ++rowOffset) {
+      const float coverage = rowOffset == -2 ? backwardGlow :
+                             rowOffset == -1 ? upperBlend :
+                             rowOffset == 0 ? 1.0f :
+                             rowOffset == 1 ? lowerBlend : forwardGlow;
+      drawPullRow(x - NOTE_WIDTH / 2, baseY + rowOffset,
+                  note.variant, coverage);
+    }
     return;
   }
 
@@ -1134,6 +1221,21 @@ void drawPlaying(uint32_t now) {
                             trailHeight, twistSplitColor(true, 1.0f));
           display->fillRect(otherX, railTop, TWIST_OTHER_WIDTH,
                             trailHeight, twistSplitColor(false, 1.0f));
+        } else if (chart[i].lane == Lane::Pull) {
+          if (chart[i].pullTransitionMs > 0) {
+            const float transitionUntil =
+                chart[i].hitMs + chart[i].pullTransitionMs - preciseTimeMs;
+            const float transitionY = NOTE_HIT_Y -
+                transitionUntil * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) /
+                    NOTE_TRAVEL_MS;
+            const int transitionRow = static_cast<int>(lroundf(transitionY));
+            drawPullTrail(x, railTop, min(railBottom, transitionRow),
+                          chart[i].endVariant);
+            drawPullTrail(x, max(railTop, transitionRow + 1), railBottom,
+                          chart[i].variant);
+          } else {
+            drawPullTrail(x, railTop, railBottom, chart[i].variant);
+          }
         } else {
           const uint16_t trailColor = noteColor(chart[i].lane, 1.0f);
           display->fillRect(x - 5, railTop, NOTE_WIDTH,
