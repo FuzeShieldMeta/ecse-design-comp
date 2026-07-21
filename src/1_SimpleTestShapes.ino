@@ -145,6 +145,7 @@ constexpr int32_t SAFE_ZONE_LEAD_MS =
 NoteDef chart[MAX_NOTES]{};
 bool resolved[MAX_NOTES]{};
 bool holding[MAX_NOTES]{};
+bool noteSpawnPresented[MAX_NOTES]{};
 Judgment holdStartJudgment[MAX_NOTES]{};
 uint32_t noteVisibleUntilMs[MAX_NOTES]{};
 uint32_t holdLastScoreAt[MAX_NOTES]{};
@@ -202,6 +203,7 @@ bool rebuildDisplay(DisplayProfile profile);
 PullState previousPullState = PullState::Rest;
 volatile uint32_t runStartedAt = 0;
 volatile uint32_t runStartedAtUs = 0;
+volatile bool songClockActive = false;
 uint32_t introStartedAt = 0;
 uint32_t pausedAt = 0;
 uint32_t pausedAtUs = 0;
@@ -295,7 +297,17 @@ uint32_t songTime(uint32_t now) {
 }
 
 bool songClockStarted(uint32_t now) {
-  return static_cast<int32_t>(now - runStartedAt) >= 0;
+  (void)now;
+  return songClockActive;
+}
+
+void beginSongClock(uint32_t now) {
+  // Start from the frame that actually completes the cinematic. This keeps a
+  // display allocation delay or skipped presentation from consuming chart
+  // time before the playfield has visibly cleared.
+  runStartedAt = now;
+  runStartedAtUs = micros();
+  songClockActive = true;
 }
 
 uint16_t perfectWindow() {
@@ -388,6 +400,7 @@ bool buildChart() {
   }
   memset(resolved, 0, sizeof(resolved));
   memset(holding, 0, sizeof(holding));
+  memset(noteSpawnPresented, 0, sizeof(noteSpawnPresented));
   memset(noteVisibleUntilMs, 0, sizeof(noteVisibleUntilMs));
   memset(holdLastScoreAt, 0, sizeof(holdLastScoreAt));
   memset(holdScoreAccumulator, 0, sizeof(holdScoreAccumulator));
@@ -514,8 +527,9 @@ bool startRun(uint32_t now) {
   }
   previousPullState = readPullState();
   introStartedAt = now;
-  runStartedAt = now + GAME_INTRO_MS;
-  runStartedAtUs = micros() + GAME_INTRO_MS * 1000UL;
+  runStartedAt = 0;
+  runStartedAtUs = 0;
+  songClockActive = false;
   ++audioRunGeneration;
   screen = Screen::Playing;
   return true;
@@ -1606,9 +1620,25 @@ void drawGameIntro(uint32_t now) {
   }
 }
 
+float noteYFromTimeUntil(float untilMs, int noteTopY) {
+  // A launch can fall between presented frames. Hold the projectile at the
+  // turret row for one frame so its first visible position is never already
+  // partway down the lane, then use the remaining time to reach the hit line
+  // at exactly the charted instant.
+  const float launchDwellMs = renderIntervalUs * 0.001f + 2.0f;
+  const float ageSinceLaunch = NOTE_TRAVEL_MS - untilMs;
+  if (ageSinceLaunch <= launchDwellMs) return noteTopY;
+  const float movingDurationMs = max(1.0f, NOTE_TRAVEL_MS - launchDwellMs);
+  return noteTopY +
+      (ageSinceLaunch - launchDwellMs) * (NOTE_HIT_Y - noteTopY) /
+          movingDurationMs;
+}
+
 void drawPlaying(uint32_t now) {
   if (!songClockStarted(now)) {
     drawGameIntro(now);
+    if (now - introStartedAt >= GAME_INTRO_MS)
+      beginSongClock(now);
     return;
   }
   const uint32_t t = songTime(now);
@@ -1692,14 +1722,18 @@ void drawPlaying(uint32_t now) {
     const float until = chart[i].hitMs - preciseTimeMs;
     const float visibleAfterHit = chart[i].holdMs + POST_HIT_DISPLAY_MS;
     if (until < -visibleAfterHit || until > NOTE_TRAVEL_MS) continue;
-    const float y = NOTE_HIT_Y -
-        until * static_cast<float>(NOTE_HIT_Y - noteTopY) / NOTE_TRAVEL_MS;
+    // Every projectile gets one presented frame exactly at its turret row.
+    // The following frame catches up to chart time, preserving hit/audio sync
+    // while preventing a late render from making the note spawn partway down.
+    const bool firstSpawnFrame = !noteSpawnPresented[i];
+    const float y = firstSpawnFrame
+                        ? static_cast<float>(noteTopY)
+                        : noteYFromTimeUntil(until, noteTopY);
+    noteSpawnPresented[i] = true;
     float tailY = y;
     if (chart[i].holdMs > 0) {
       const float tailUntil = chart[i].hitMs + chart[i].holdMs - preciseTimeMs;
-      tailY = NOTE_HIT_Y -
-          tailUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
-          NOTE_TRAVEL_MS;
+      tailY = noteYFromTimeUntil(tailUntil, noteTopY);
       if (y < noteTopY || tailY > 63) continue;
     } else if (y < noteTopY || y > 63) {
       continue;
@@ -1728,9 +1762,8 @@ void drawPlaying(uint32_t now) {
           if (chart[i].transitionMs > 0) {
             const float transitionUntil =
                 chart[i].hitMs + chart[i].transitionMs - preciseTimeMs;
-            const float transitionY = NOTE_HIT_Y -
-                transitionUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
-                    NOTE_TRAVEL_MS;
+            const float transitionY =
+                noteYFromTimeUntil(transitionUntil, noteTopY);
             const int transitionRow = static_cast<int>(lroundf(transitionY));
             drawTwistTrail(x, railTop, min(railBottom, transitionRow),
                            chart[i].endVariant);
@@ -1743,9 +1776,8 @@ void drawPlaying(uint32_t now) {
           if (chart[i].transitionMs > 0) {
             const float transitionUntil =
                 chart[i].hitMs + chart[i].transitionMs - preciseTimeMs;
-            const float transitionY = NOTE_HIT_Y -
-                transitionUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
-                    NOTE_TRAVEL_MS;
+            const float transitionY =
+                noteYFromTimeUntil(transitionUntil, noteTopY);
             const int transitionRow = static_cast<int>(lroundf(transitionY));
             drawPullTrail(x, railTop, min(railBottom, transitionRow),
                           chart[i].endVariant);
