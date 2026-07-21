@@ -1426,7 +1426,7 @@ uint16_t noteColor(Lane lane, float brightness) {
   if (lane == Lane::Twist) {
     r = 255; g = 0; b = 0;
   } else if (lane == Lane::Push) {
-    r = 0; g = 255; b = 0;
+    r = 255; g = 225; b = 0;
   } else {
     r = 0; g = 80; b = 255;
   }
@@ -1818,14 +1818,14 @@ void drawPlaying(uint32_t now) {
 
   // Draw the lane-specific timing segments before notes so approaching notes
   // remain visible as they cross the line. These colours deliberately avoid
-  // the red, green, and blue note palette: white=idle, yellow=perfect,
+  // the red, yellow, and blue note palette: white=idle, green=perfect,
   // magenta=good, and orange=miss.
   for (uint8_t laneIndex = 0; laneIndex < 3; ++laneIndex) {
     uint16_t barColor = rgb(255, 255, 255);
     const Judgment result = laneJudgments[laneIndex];
     if (result != Judgment::None &&
         now - laneJudgmentShownAt[laneIndex] < 300) {
-      barColor = result == Judgment::Perfect ? rgb(255, 255, 0) :
+      barColor = result == Judgment::Perfect ? rgb(0, 255, 80) :
                  result == Judgment::Good ? rgb(255, 0, 255) :
                                             rgb(255, 80, 0);
     }
