@@ -34,7 +34,6 @@ note=8500,pull,full
 gimmick_note=1,15,column,1,0,674
 note=9000,pull,full
 
-gimmick_note=1,16,column,1,367,1174
 note=9500,pull,half,375,full,187,0
 
 gimmick_note=1,17,column,1,867,1674
@@ -80,7 +79,6 @@ note=18000,pull,full,0,same,0,1
 
 gimmick=4,lane_pulse,18333,2200,target=twist,color=255:64:64,brightness=0.18,rate=2.0,pattern=solid
 
-gimmick_note=3,34,column,1,2034,2800
 note=18500,pull,full,375,half,187,1
 
 gimmick_note=3,35,column,1,2534,2800
@@ -122,7 +120,6 @@ note=8250,pull,full
 gimmick_note=1,23,column,1,0,174
 note=8500,pull,full
 
-gimmick_note=1,24,column,1,0,424
 note=8750,pull,half,375,full,187,0
 
 gimmick_note=1,25,column,1,117,924
@@ -137,7 +134,6 @@ note=9750,pull,full
 gimmick_note=1,28,column,1,867,1674
 note=10000,pull,full
 
-gimmick_note=1,29,column,1,1117,1924
 note=10250,pull,full,375,half,187,0
 
 gimmick_note=1,30,column,1,1617,2424
@@ -154,9 +150,7 @@ note=11250,pull,full
 gimmick_note=1,33,column,1,2367,2800
 note=11500,pull,full
 
-gimmick_note=1,34,column,1,2617,2800
 note=11750,pull,half,375,full,187,0
-
 note=12250,pull,full
 note=12500,pull,full
 note=12750,pull,full
@@ -179,7 +173,6 @@ note=15750,pull,full
 gimmick_note=3,48,column,1,0,341
 note=16000,pull,full
 
-gimmick_note=3,49,column,1,0,591
 note=16250,pull,full,375,half,187,0
 
 gimmick_note=3,50,column,1,284,1091
@@ -194,7 +187,6 @@ note=17250,pull,full,0,same,0,1
 gimmick_note=3,53,column,1,1034,1841
 note=17500,pull,full,0,same,0,1
 
-gimmick_note=3,54,column,1,1284,2091
 note=17750,pull,half,375,full,187,1
 
 gimmick_note=3,55,column,1,1784,2591
@@ -211,9 +203,7 @@ note=18750,pull,full,0,same,0,1
 gimmick_note=3,58,column,1,2534,2800
 note=19000,pull,full,0,same,0,1
 
-gimmick_note=3,59,column,1,2784,2800
 note=19250,pull,full,375,half,187,1
-
 note=19750,pull,full,0,same,0,1
 note=20000,pull,full,0,same,0,1
 note=20250,pull,full,0,same,0,1
@@ -225,265 +215,126 @@ note=21750,pull,full,0,same,0,1
 mapping=2
 
 note=2000,pull,full
-note=2125,push,tap
 note=2250,twist,right
-note=2375,push,tap
 note=2500,pull,full
-note=2625,push,tap
 note=2750,push,tap
-note=2875,twist,left
 note=3000,pull,full
-note=3125,twist,left
 note=3250,twist,right,375,same,0,0
-note=3500,pull,half,375,full,187,0
-note=3625,push,tap
-note=3750,push,tap
 note=4000,pull,full
-note=4125,push,tap
 note=4250,twist,right
-note=4375,push,tap
 note=4500,pull,full
-note=4625,push,tap
 note=4750,push,tap
-note=4875,twist,left
 note=5000,pull,full
-note=5125,twist,left
 note=5250,twist,right
-note=5375,twist,left,375,same,0,0
 note=5500,pull,full
-note=5625,push,tap
 note=5750,push,tap
 note=6000,pull,full
-note=6125,push,tap
 note=6250,twist,right
-note=6375,push,tap
 note=6500,pull,full,375,half,187,0
-note=6625,push,tap
-note=6750,push,tap
-note=6875,twist,left
-note=7000,pull,full
 note=7125,twist,left
-note=7250,twist,right
 
 gimmick=1,wind,7333,2800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
 
 note=7375,twist,left
-note=7500,pull,full
 note=7625,push,tap
-note=7750,push,tap
 note=8000,pull,full
-note=8125,push,tap
 note=8250,twist,right,375,same,0,0
 
-gimmick_note=1,48,column,1,0,49
-note=8375,push,tap
-
-gimmick_note=1,49,column,1,0,174
-note=8500,pull,full
-
-gimmick_note=1,50,column,0,0,299
-note=8625,push,tap
-
-gimmick_note=1,51,column,2,0,424
-note=8750,push,tap
-
-gimmick_note=1,52,column,1,0,549
+gimmick_note=1,23,column,1,0,549
 note=8875,twist,left
 
-gimmick_note=1,53,column,1,0,674
-note=9000,pull,full
-
-gimmick_note=1,54,column,1,0,799
+gimmick_note=1,24,column,1,0,799
 note=9125,twist,left
 
-gimmick_note=1,55,column,1,117,924
-note=9250,twist,right
-
-gimmick_note=1,56,column,1,242,1049
+gimmick_note=1,25,column,1,242,1049
 note=9375,twist,left
 
-gimmick_note=1,57,column,1,367,1174
-note=9500,pull,half,375,full,187,0
-
-gimmick_note=1,58,column,0,492,1299
+gimmick_note=1,26,column,0,492,1299
 note=9625,push,tap
 
-gimmick_note=1,59,column,2,617,1424
-note=9750,push,tap
-
-gimmick_note=1,60,column,1,867,1674
+gimmick_note=1,27,column,1,867,1674
 note=10000,pull,full
 
-gimmick_note=1,61,column,2,992,1799
-note=10125,push,tap
-
-gimmick_note=1,62,column,1,1117,1924
+gimmick_note=1,28,column,1,1117,1924
 note=10250,twist,right
 
-gimmick_note=1,63,column,2,1242,2049
-note=10375,push,tap
-
-gimmick_note=1,64,column,1,1367,2174
+gimmick_note=1,29,column,1,1367,2174
 note=10500,pull,full
 
-gimmick_note=1,65,column,2,1492,2299
-note=10625,push,tap
-
-gimmick_note=1,66,column,0,1617,2424
+gimmick_note=1,30,column,0,1617,2424
 note=10750,push,tap
-
-gimmick_note=1,67,column,1,1742,2549
-note=10875,twist,left,375,same,0,0
 
 gimmick=2,screen_flash,11000,900,target=all,color=255:208:96,brightness=0.24,rate=4.0,pattern=checker
 
-gimmick_note=1,68,column,0,1867,2674
+gimmick_note=1,31,column,1,1867,2674
 note=11000,pull,full
 
-gimmick_note=1,69,column,1,2117,2800
+gimmick_note=1,32,column,1,2117,2800
 note=11250,twist,right
 
-gimmick_note=1,70,column,1,2242,2800
-note=11375,twist,left
-
-gimmick_note=1,71,column,1,2367,2800
+gimmick_note=1,33,column,1,2367,2800
 note=11500,pull,full
 
-gimmick_note=1,72,column,0,2492,2800
-note=11625,push,tap
-
-gimmick_note=1,73,column,2,2617,2800
+gimmick_note=1,34,column,0,2617,2800
 note=11750,push,tap
 
 note=12000,pull,full
-note=12125,push,tap
 note=12250,twist,right
-note=12375,push,tap
 note=12500,pull,full,375,half,187,0
-note=12625,push,tap
-note=12750,push,tap
-note=12875,twist,left
-note=13000,pull,full
 note=13125,twist,left,375,same,0,0
-note=13500,pull,full
-note=13625,push,tap
 note=13750,push,tap
 note=14000,pull,full
-note=14125,push,tap
 note=14250,twist,right
-note=14375,push,tap
 note=14500,pull,full
-note=14625,push,tap
 
 gimmick=3,wind,14666,2800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
 
 note=14750,push,tap
-note=14875,twist,left
 note=15000,pull,full
-note=15125,twist,left
 note=15250,twist,right,375,same,0,0
-note=15500,pull,half,375,full,187,0
-note=15625,push,tap
 
-gimmick_note=3,100,column,0,0,91
-note=15750,push,tap
-
-gimmick_note=3,101,column,1,0,341
+gimmick_note=3,46,column,1,0,341
 note=16000,pull,full
 
-gimmick_note=3,102,column,0,0,466
-note=16125,push,tap
-
-gimmick_note=3,103,column,1,0,591
+gimmick_note=3,47,column,1,0,591
 note=16250,twist,right
 
-gimmick_note=3,104,column,0,0,716
-note=16375,push,tap
-
-gimmick_note=3,105,column,1,34,841
+gimmick_note=3,48,column,1,34,841
 note=16500,pull,full
 
-gimmick_note=3,106,column,0,159,966
-note=16625,push,tap
-
-gimmick_note=3,107,column,2,284,1091
+gimmick_note=3,49,column,2,284,1091
 note=16750,push,tap
 
-gimmick_note=3,108,column,1,409,1216
-note=16875,twist,left
-
-gimmick_note=3,109,column,1,534,1341
+gimmick_note=3,50,column,1,534,1341
 note=17000,pull,full,0,same,0,1
 
-gimmick_note=3,110,column,1,659,1466
-note=17125,twist,left,0,same,0,1
-
-gimmick_note=3,111,column,1,784,1591
+gimmick_note=3,51,column,1,784,1591
 note=17250,twist,right,0,same,0,1
 
-gimmick_note=3,112,column,1,909,1716
-note=17375,twist,left,375,same,0,1
-
-gimmick_note=3,113,column,0,1034,1841
+gimmick_note=3,52,column,1,1034,1841
 note=17500,pull,full,0,same,0,1
 
-gimmick_note=3,114,column,0,1159,1966
-note=17625,push,tap,0,same,0,1
-
-gimmick_note=3,115,column,2,1284,2091
+gimmick_note=3,53,column,2,1284,2091
 note=17750,push,tap,0,same,0,1
 
-gimmick_note=3,116,column,1,1534,2341
+gimmick_note=3,54,column,1,1534,2341
 note=18000,pull,full,0,same,0,1
 
-gimmick_note=3,117,column,2,1659,2466
-note=18125,push,tap,0,same,0,1
-
-gimmick_note=3,118,column,1,1784,2591
+gimmick_note=3,55,column,1,1784,2591
 note=18250,twist,right,0,same,0,1
 
 gimmick=4,lane_pulse,18333,2200,target=twist,color=255:64:64,brightness=0.18,rate=2.0,pattern=solid
 
-gimmick_note=3,119,column,2,1909,2716
-note=18375,push,tap,0,same,0,1
-
-gimmick_note=3,120,column,1,2034,2800
 note=18500,pull,full,375,half,187,1
 
-gimmick_note=3,121,column,2,2159,2800
-note=18625,push,tap,0,same,0,1
-
-gimmick_note=3,122,column,0,2284,2800
-note=18750,push,tap,0,same,0,1
-
-gimmick_note=3,123,column,1,2409,2800
-note=18875,twist,left,0,same,0,1
-
-gimmick_note=3,124,column,1,2534,2800
-note=19000,pull,full,0,same,0,1
-
-gimmick_note=3,125,column,1,2659,2800
+gimmick_note=3,57,column,1,2659,2800
 note=19125,twist,left,0,same,0,1
 
-gimmick_note=3,126,column,1,2784,2800
-note=19250,twist,right,0,same,0,1
-
 note=19375,twist,left,0,same,0,1
-note=19500,pull,full,0,same,0,1
 note=19625,push,tap,0,same,0,1
-note=19750,push,tap,0,same,0,1
 note=20000,pull,full,0,same,0,1
-note=20125,push,tap,0,same,0,1
 note=20250,twist,right,375,same,0,1
-note=20375,push,tap,0,same,0,1
-note=20500,pull,full,0,same,0,1
-note=20625,push,tap,0,same,0,1
-note=20750,push,tap,0,same,0,1
 note=20875,twist,left,0,same,0,1
-note=21000,pull,full,0,same,0,1
 note=21125,twist,left,0,same,0,1
-note=21250,twist,right,0,same,0,1
 note=21375,twist,left,0,same,0,1
-note=21500,pull,half,375,full,187,1
 note=21625,push,tap,0,same,0,1
-note=21750,push,tap,0,same,0,1

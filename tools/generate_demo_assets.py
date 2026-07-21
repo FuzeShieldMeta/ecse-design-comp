@@ -16,6 +16,8 @@ GIMMICK_SAFE_ZONE_Y = 26
 SAFE_ZONE_LEAD_MS = (
     NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) // NOTE_HIT_Y
 )
+HARD_MIN_NOTE_GAP_MS = 220
+COLUMN_CLEARANCE_MS = 220
 OUTPUT = Path(__file__).resolve().parents[1] / "data" / "songs"
 
 SONGS = (
@@ -220,9 +222,32 @@ def build_notes(song_index: int, song: dict,
         control_held_until[note["lane"]] = note["hit"] + note["hold"]
     notes = filtered
 
+    if difficulty == 2:
+        # HARD may follow the sixteenth-note analysis grid, but the physical
+        # spring controls and five-row note sprites still require separation.
+        # Keep the first musical cue in each too-dense group and give a hold
+        # exclusive ownership of the action stream until it is released.
+        playable: list[dict] = []
+        previous_hit = -HARD_MIN_NOTE_GAP_MS
+        hold_blocked_until = 0
+        for note in notes:
+            if (note["hit"] - previous_hit < HARD_MIN_NOTE_GAP_MS or
+                    note["hit"] < hold_blocked_until):
+                continue
+            playable.append(note)
+            previous_hit = note["hit"]
+            if note["hold"]:
+                hold_blocked_until = (note["hit"] + note["hold"] +
+                                      HARD_MIN_NOTE_GAP_MS)
+        notes = playable
+
     duration = 2000 + total_steps * step_ms
     gusts = ((duration // 3, 2800), (duration * 2 // 3, 2800))
     for index, note in enumerate(notes):
+        # A moving sustain can sweep through multiple incoming notes. Long
+        # rails remain anchored to the column matching their physical control.
+        if note["hold"]:
+            continue
         upper_start = max(0, note["hit"] - NOTE_TRAVEL_MS)
         safe_entry = max(0, note["hit"] - SAFE_ZONE_LEAD_MS)
         for gimmick_id, (gust_start, gust_duration) in enumerate(gusts, start=1):
@@ -246,13 +271,18 @@ def build_notes(song_index: int, song: dict,
         chosen = next(
             (column for column in choices
              if 0 <= column < 3 and note["hit"] >= occupied_until[column]),
-            desired,
+            note["lane"],
         )
         if note["shift_end"] > 0:
             note["end_col"] = chosen
+            if chosen == note["lane"]:
+                note["shift_start"] = 0
+                note["shift_end"] = 0
+                note["gimmick_id"] = 0
         else:
             chosen = note["lane"]
-        occupied_until[chosen] = note["hit"] + note["hold"]
+        occupied_until[chosen] = (note["hit"] + note["hold"] +
+                                  COLUMN_CLEARANCE_MS)
     return notes, duration, list(gusts)
 
 

@@ -18,16 +18,24 @@ HOP = 128
 WINDOW = 512
 NOTE_TRAVEL_MS = 1800
 SAFE_ZONE_LEAD_MS = NOTE_TRAVEL_MS * (58 - 26) // 58
+MIN_NOTE_GAP_MS = (260, 260, 230)
+COLUMN_CLEARANCE_MS = 220
 
 
 def load_analysis_audio(path: Path) -> tuple[np.ndarray, float]:
     with wave.open(str(path), "rb") as source:
-        if source.getsampwidth() != 2:
-            raise ValueError("source must be 16-bit PCM WAV")
+        sample_width = source.getsampwidth()
+        if sample_width not in (1, 2):
+            raise ValueError("source must be 8-bit or 16-bit PCM WAV")
         sample_rate = source.getframerate()
         channels = source.getnchannels()
-        raw = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
-    audio = raw.reshape(-1, channels).mean(axis=1).astype(np.float32) / 32768.0
+        encoded = source.readframes(source.getnframes())
+    if sample_width == 1:
+        raw = np.frombuffer(encoded, dtype=np.uint8).astype(np.float32)
+        raw = (raw - 128.0) / 128.0
+    else:
+        raw = np.frombuffer(encoded, dtype="<i2").astype(np.float32) / 32768.0
+    audio = raw.reshape(-1, channels).mean(axis=1)
     if sample_rate % ANALYSIS_RATE != 0:
         raise ValueError("source rate must be an integer multiple of 11025 Hz")
     audio = audio[:: sample_rate // ANALYSIS_RATE]
@@ -119,6 +127,38 @@ def opening_rhythm_slots(features: dict[str, np.ndarray], duration: float,
     return sorted(selected), intro_end
 
 
+def declutter_notes(notes: list[dict], difficulty: int) -> list[dict]:
+    """Keep strong musical cues while enforcing one playable action stream."""
+    minimum_gap = MIN_NOTE_GAP_MS[difficulty]
+    ordered = sorted(notes, key=lambda note: note["hit"])
+    # Onset analysis can snap neighbouring grid points to the same transient.
+    # Select strong cues globally, then suppress only their immediate temporal
+    # neighbours. Unlike transitive clustering, a continuous eighth-note phrase
+    # cannot collapse into one enormous group and disappear from the chart.
+    ranked = sorted(ordered, key=lambda note: (
+        note["hold"] > 0, note["onset"], note["rms"]
+    ), reverse=True)
+    selected: list[dict] = []
+    for note in ranked:
+        if all(abs(note["hit"] - kept["hit"]) >= minimum_gap
+               for kept in selected):
+            selected.append(note)
+    selected.sort(key=lambda note: note["hit"])
+
+    # The cabinet has one player operating spring-return physical controls.
+    # A long hold therefore owns the action stream until it has completed and
+    # the same minimum recovery gap has elapsed.
+    playable: list[dict] = []
+    blocked_until = 0
+    for note in selected:
+        if note["hit"] < blocked_until:
+            continue
+        playable.append(note)
+        if note["hold"]:
+            blocked_until = note["hit"] + note["hold"] + minimum_gap
+    return playable
+
+
 def contextual_notes(features: dict[str, np.ndarray], duration: float,
                      bpm: float, phase: float, difficulty: int) -> list[dict]:
     period = 60.0 / bpm
@@ -151,7 +191,13 @@ def contextual_notes(features: dict[str, np.ndarray], duration: float,
     lane_counts = [0, 0, 0]
     previous_lane = -1
     repeated_lane = 0
-    for grid_time in candidates[:220]:
+    # Analyze the complete song even when HARD produces more grid points than
+    # the firmware's 220-note capacity. Uniform musical-grid sampling preserves
+    # the intro, middle, and ending instead of silently truncating the chart.
+    if len(candidates) > 220:
+        indices = np.linspace(0, len(candidates) - 1, 220)
+        candidates = [candidates[round(float(index))] for index in indices]
+    for grid_time in candidates:
         frame = int(round(grid_time * ANALYSIS_RATE / HOP))
         radius = max(1, round(0.07 * ANALYSIS_RATE / HOP))
         start = max(0, frame - radius)
@@ -201,15 +247,7 @@ def contextual_notes(features: dict[str, np.ndarray], duration: float,
                 pull_transition = not pull_transition
             last_hold = time_seconds
 
-    # Never schedule a second action on a control while its hold is active.
-    hold_until = [0, 0, 0]
-    filtered = []
-    for note in notes:
-        if note["hit"] < hold_until[note["lane"]]:
-            continue
-        filtered.append(note)
-        hold_until[note["lane"]] = note["hit"] + note["hold"]
-    return filtered
+    return declutter_notes(notes, difficulty)
 
 
 def section_gusts(features: dict[str, np.ndarray], duration: float) -> list[tuple[int, int]]:
@@ -315,6 +353,10 @@ def contextual_visual_gimmicks(features: dict[str, np.ndarray], duration: float,
 
 def apply_wind_and_columns(notes: list[dict], gusts: list[tuple[int, int]]) -> None:
     for index, note in enumerate(notes):
+        # Moving a long rail makes its display occupancy ambiguous and can
+        # sweep it through incoming taps. Holds remain in their physical lane.
+        if note["hold"]:
+            continue
         upper_start = max(0, note["hit"] - NOTE_TRAVEL_MS)
         safe_entry = max(0, note["hit"] - SAFE_ZONE_LEAD_MS)
         for gimmick_id, (gust_start, duration) in enumerate(gusts, start=1):
@@ -336,12 +378,44 @@ def apply_wind_and_columns(notes: list[dict], gusts: list[tuple[int, int]]) -> N
         for distance in (1, 2):
             choices.extend((desired - distance, desired + distance))
         chosen = next((column for column in choices if 0 <= column < 3 and
-                       note["hit"] >= occupied_until[column]), desired)
+                       note["hit"] >= occupied_until[column]), note["lane"])
         if note["shift_end"] > 0:
             note["end_col"] = chosen
+            if chosen == note["lane"]:
+                note["shift_start"] = 0
+                note["shift_end"] = 0
+                note["gimmick_id"] = 0
         else:
             chosen = note["lane"]
-        occupied_until[chosen] = note["hit"] + note["hold"]
+        occupied_until[chosen] = (note["hit"] + note["hold"] +
+                                  COLUMN_CLEARANCE_MS)
+
+
+def validate_playability(notes: list[dict], difficulty: int,
+                         duration_ms: int) -> None:
+    """Reject importer regressions that cannot be played or read safely."""
+    minimum_gap = MIN_NOTE_GAP_MS[difficulty]
+    hold_blocked_until = 0
+    occupied_until = [0, 0, 0]
+    previous_hit: int | None = None
+    for note in notes:
+        if previous_hit is not None and note["hit"] - previous_hit < minimum_gap:
+            raise ValueError("generated notes violate the global action gap")
+        if note["hit"] < hold_blocked_until:
+            raise ValueError("generated action overlaps an active hold")
+        if note["hold"] and note["gimmick_id"]:
+            raise ValueError("wind must not move a hold rail")
+        column = note["end_col"]
+        if note["hit"] < occupied_until[column]:
+            raise ValueError("generated notes overlap in a display column")
+        occupied_until[column] = (note["hit"] + note["hold"] +
+                                  COLUMN_CLEARANCE_MS)
+        if note["hold"]:
+            hold_blocked_until = note["hit"] + note["hold"] + minimum_gap
+        previous_hit = note["hit"]
+    last_note_end = max(note["hit"] + note["hold"] for note in notes)
+    if duration_ms - last_note_end > 2000:
+        raise ValueError("generated mapping ends more than two seconds early")
 
 
 def action(lane: int, variant: bool) -> str:
@@ -493,7 +567,7 @@ def register_chart(index_path: Path, chart_name: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyze a 16-bit PCM WAV and create an importable BOP song"
+        description="Analyze an 8/16-bit PCM WAV and create an importable BOP song"
     )
     parser.add_argument("source", type=Path, help="16-bit PCM source WAV")
     parser.add_argument("--cover", type=Path, required=True,
@@ -532,8 +606,9 @@ def main() -> None:
     mappings = [contextual_notes(features, duration, bpm, phase, difficulty)
                 for difficulty in range(3)]
     gusts = section_gusts(features, duration)
-    for notes in mappings:
+    for difficulty, notes in enumerate(mappings):
         apply_wind_and_columns(notes, gusts)
+        validate_playability(notes, difficulty, round(duration * 1000))
     visual_gimmicks = contextual_visual_gimmicks(features, duration, gusts)
     cover_path = args.output / f"{slug}.rgb888"
     audio_path = args.output / f"{slug}.wav"
