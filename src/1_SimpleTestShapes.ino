@@ -66,13 +66,19 @@ enum class Judgment : uint8_t { None, Perfect, Good, Miss };
 enum class Screen : uint8_t {
   Select, DifficultySelect, Playing, Paused, Results, Failed
 };
-enum class DisplayProfile : uint8_t { None, Select, Game };
+enum class DisplayProfile : uint8_t { None, Select, Game, Cinematic };
 enum class GimmickType : uint8_t {
   WindGust, ScreenFlash, LanePulse, CommanderApproach
 };
 enum class PullState : uint8_t { Rest, Half, Full, Fault };
 enum class StartupTestPhase : uint8_t {
   Carousel, FinalCover, DifficultyWait
+};
+
+struct CinematicColor {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
 };
 
 struct NoteDef {
@@ -137,6 +143,7 @@ constexpr int HEALTH_BAR_WIDTH = 64;
 constexpr uint16_t HEALTH_REGEN_FLASH_MS = 350;
 constexpr uint8_t SELECT_COLOR_DEPTH_BITS = 8;
 constexpr uint8_t GAME_COLOR_DEPTH_BITS = 5;
+constexpr uint8_t CINEMATIC_COLOR_DEPTH_BITS = 8;
 constexpr uint32_t SELECT_RENDER_INTERVAL_US = 33333UL;  // 30 FPS
 constexpr int32_t SAFE_ZONE_LEAD_MS =
     NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) /
@@ -504,10 +511,11 @@ bool startRun(uint32_t now) {
     Serial.println(F("Selected chart mapping failed to load; run not started"));
     return false;
   }
-  // Stop and release the high-colour selection buffers before timing or audio
-  // begins, then allocate the faster gameplay profile from a clean heap.
-  if (!rebuildDisplay(DisplayProfile::Game)) {
-    Serial.println(F("Gameplay display transition failed; run not started"));
+  // Rebuild and refresh the dedicated high-colour profile before the opening
+  // cinematic's first frame. Gameplay buffers are allocated only after the
+  // intro itself starts the song clock.
+  if (!rebuildDisplay(DisplayProfile::Cinematic)) {
+    Serial.println(F("Opening cinematic transition failed; run not started"));
     return false;
   }
   now = millis();
@@ -1305,43 +1313,94 @@ void drawInvaderShip(int yOffset, uint16_t bodyColor, uint16_t eyeColor,
 }
 
 void drawCinematicEarth(int centerY, int radius, uint8_t rotation) {
-  // High-contrast RGB565-safe colours keep the planet readable on the panel:
-  // a cyan atmosphere, saturated blue ocean, green land, and white ice/clouds.
+  // Gameplay retains a compact RGB565 version, while either cinematic uses
+  // direct RGB888 ocean shading and atmosphere falloff.
   const uint16_t atmosphere = rgb(0, 220, 255);
   const uint16_t ocean = rgb(0, 55, 210);
   const uint16_t oceanLight = rgb(0, 115, 255);
   const uint16_t land = rgb(35, 220, 70);
   const uint16_t landLight = rgb(150, 255, 50);
   const uint16_t cloud = rgb(235, 255, 255);
+  constexpr CinematicColor land888{32, 218, 67};
+  constexpr CinematicColor landLight888{148, 255, 48};
+  constexpr CinematicColor cloud888{236, 252, 255};
   const int centerX = 31;
-  display->fillCircle(centerX, centerY, radius, atmosphere);
-  display->fillCircle(centerX, centerY, max(1, radius - 2), ocean);
-  display->drawCircle(centerX - 2, centerY - 2, max(1, radius - 4),
-                      oceanLight);
+  const bool highColor = activeDisplayProfile == DisplayProfile::Cinematic &&
+                         activeDmaColorDepth >= CINEMATIC_COLOR_DEPTH_BITS;
+  if (highColor) {
+    const int radiusSquared = radius * radius;
+    for (int y = max(0, centerY - radius);
+         y <= min(63, centerY + radius); ++y) {
+      for (int x = max(0, centerX - radius);
+           x <= min(63, centerX + radius); ++x) {
+        const int dx = x - centerX;
+        const int dy = y - centerY;
+        const int distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared > radiusSquared) continue;
+        const int distance = lroundf(sqrtf(distanceSquared));
+        const int edge = radius - distance;
+        const uint8_t texture = static_cast<uint8_t>(
+            x * 23 + y * 41 + rotation * 17 + dx * dy);
+        if (edge <= 1) {
+          display->drawPixelRGB888(x, y, 20, 225, 255);
+        } else {
+          const uint8_t red = 2 + ((texture >> 6) & 1) * 4;
+          const uint8_t green = constrain(48 + edge * 4 +
+                                          static_cast<int>(texture & 15),
+                                          0, 132);
+          const uint8_t blue = constrain(176 + edge * 4 +
+                                         static_cast<int>((texture >> 2) & 23),
+                                         0, 255);
+          display->drawPixelRGB888(x, y, red, green, blue);
+        }
+      }
+    }
+  } else {
+    display->fillCircle(centerX, centerY, radius, atmosphere);
+    display->fillCircle(centerX, centerY, max(1, radius - 2), ocean);
+    display->drawCircle(centerX - 2, centerY - 2, max(1, radius - 4),
+                        oceanLight);
+  }
 
   const int diameter = radius * 2 - 5;
   const int scroll = diameter > 0 ? rotation % diameter : 0;
   auto drawLandPatch = [&](int baseX, int baseY, int width, int height,
-                           uint16_t color) {
+                           uint16_t color, CinematicColor color888) {
     const int innerRadius = max(1, radius - 3);
     for (int py = 0; py < height; ++py) {
       for (int px = 0; px < width; ++px) {
         const int localX = (baseX + px + scroll) % diameter - diameter / 2;
         const int localY = baseY + py;
-        if (localX * localX + localY * localY <=
-            innerRadius * innerRadius)
+        if (localX * localX + localY * localY >
+            innerRadius * innerRadius) continue;
+        if (highColor)
+          display->drawPixelRGB888(centerX + localX, centerY + localY,
+                                   color888.red, color888.green,
+                                   color888.blue);
+        else
           display->drawPixel(centerX + localX, centerY + localY, color);
       }
     }
   };
-  drawLandPatch(2, -radius / 2, 6, 4, land);
-  drawLandPatch(5, -radius / 2 + 3, 5, 5, landLight);
-  drawLandPatch(diameter / 2 + 2, 1, 7, 4, land);
-  drawLandPatch(diameter / 2, 4, 5, 3, landLight);
-  display->drawFastHLine(centerX - radius / 2, centerY - radius + 4,
-                         radius, cloud);
-  display->drawFastHLine(centerX - radius + 5, centerY - 1,
-                         max(2, radius / 2), cloud);
+  drawLandPatch(2, -radius / 2, 6, 4, land, land888);
+  drawLandPatch(5, -radius / 2 + 3, 5, 5, landLight, landLight888);
+  drawLandPatch(diameter / 2 + 2, 1, 7, 4, land, land888);
+  drawLandPatch(diameter / 2, 4, 5, 3, landLight, landLight888);
+  if (highColor) {
+    for (int x = centerX - radius / 2;
+         x < centerX + radius / 2; ++x)
+      display->drawPixelRGB888(x, centerY - radius + 4,
+                               cloud888.red, cloud888.green, cloud888.blue);
+    for (int x = centerX - radius + 5;
+         x < centerX - radius + 5 + max(2, radius / 2); ++x)
+      display->drawPixelRGB888(x, centerY - 1,
+                               cloud888.red, cloud888.green, cloud888.blue);
+  } else {
+    display->drawFastHLine(centerX - radius / 2, centerY - radius + 4,
+                           radius, cloud);
+    display->drawFastHLine(centerX - radius + 5, centerY - 1,
+                           max(2, radius / 2), cloud);
+  }
 }
 
 uint16_t noteColor(Lane lane, float brightness) {
@@ -1583,11 +1642,32 @@ void drawGameIntro(uint32_t now) {
   const uint32_t age = now - introStartedAt;
   display->fillScreen(0);
 
-  // Sparse fixed stars establish scale without producing noisy low-bit-depth
-  // gradients on the HUB75 panels.
-  const uint16_t star = rgb(100, 120, 180);
-  for (uint8_t i = 0; i < 12; ++i)
-    display->drawPixel((i * 17 + 5) % 64, (i * 11 + 3) % 54, star);
+  // RGB888 stars vary in temperature and twinkle at the DMA-safe cinematic
+  // cadence. A few dim coloured dust pixels add depth while
+  // leaving the commander and Earth silhouettes clean.
+  for (uint8_t i = 0; i < 22; ++i) {
+    const int x = (i * 17 + 5) % 64;
+    const int y = (i * 11 + 3) % 54;
+    const uint8_t twinkle = 105 + ((i * 37 + age / 66) & 63);
+    if (activeDmaColorDepth >= CINEMATIC_COLOR_DEPTH_BITS) {
+      const uint8_t red = i % 3 == 0 ? twinkle : twinkle * 3 / 5;
+      const uint8_t green = i % 3 == 1 ? twinkle : twinkle * 4 / 5;
+      const uint8_t blue = min<uint16_t>(255, twinkle + 55);
+      display->drawPixelRGB888(x, y, red, green, blue);
+    } else {
+      display->drawPixel(x, y, rgb(twinkle * 3 / 5,
+                                    twinkle * 4 / 5, twinkle));
+    }
+  }
+  if (activeDmaColorDepth >= CINEMATIC_COLOR_DEPTH_BITS) {
+    for (uint8_t dust = 0; dust < 12; ++dust) {
+      const int x = (dust * 29 + 9) % 64;
+      const int y = (dust * 19 + 7) % 48;
+      display->drawPixelRGB888(x, y,
+          dust & 1 ? 24 : 47, dust & 1 ? 18 : 31,
+          dust & 1 ? 72 : 91);
+    }
+  }
 
   float retreat = 0.0f;
   if (age > GAME_INTRO_HOLD_MS) {
@@ -1603,6 +1683,16 @@ void drawGameIntro(uint32_t now) {
   const int earthRadius = lroundf(17 - 4 * retreat);
   const uint8_t noFire[3]{};
   const int launchY = constrain(commanderY + 20, NOTE_TOP_Y, 20);
+  if (activeDmaColorDepth >= CINEMATIC_COLOR_DEPTH_BITS) {
+    const int haloRadius = earthRadius + 2;
+    for (int angleStep = 0; angleStep < 32; ++angleStep) {
+      const float angle = angleStep * (PI * 2.0f / 32.0f);
+      const int x = 31 + lroundf(cosf(angle) * haloRadius);
+      const int y = earthY + lroundf(sinf(angle) * haloRadius);
+      if (x >= 0 && x < 64 && y >= 0 && y < 64)
+        display->drawPixelRGB888(x, y, 16, 104, 184);
+    }
+  }
   drawInvaderShip(commanderY, rgb(60, 255, 35), rgb(4, 0, 18),
                   ((age / 220) & 1) != 0, noFire, launchY);
   drawCinematicEarth(earthY, earthRadius, age / 70);
@@ -1843,34 +1933,184 @@ void drawPlaying(uint32_t now) {
     centeredText("PULL FAULT", 17, rgb(255, 20, 20));
 }
 
+void cinematicPixel(int x, int y, CinematicColor color) {
+  if (x < 0 || x >= 64 || y < 0 || y >= 64) return;
+  display->drawPixelRGB888(x, y, color.red, color.green, color.blue);
+}
+
+void cinematicFillRect(int x, int y, int width, int height,
+                       CinematicColor color) {
+  for (int row = max(0, y); row < min(64, y + height); ++row)
+    for (int column = max(0, x); column < min(64, x + width); ++column)
+      cinematicPixel(column, row, color);
+}
+
+void cinematicFillCircle(int centerX, int centerY, int radius,
+                         CinematicColor color) {
+  const int radiusSquared = radius * radius;
+  for (int y = max(0, centerY - radius);
+       y <= min(63, centerY + radius); ++y) {
+    for (int x = max(0, centerX - radius);
+         x <= min(63, centerX + radius); ++x) {
+      const int dx = x - centerX;
+      const int dy = y - centerY;
+      if (dx * dx + dy * dy <= radiusSquared)
+        cinematicPixel(x, y, color);
+    }
+  }
+}
+
+void cinematicCircle(int centerX, int centerY, int radius,
+                     CinematicColor color) {
+  const int outerSquared = radius * radius;
+  const int innerRadius = max(0, radius - 1);
+  const int innerSquared = innerRadius * innerRadius;
+  for (int y = max(0, centerY - radius);
+       y <= min(63, centerY + radius); ++y) {
+    for (int x = max(0, centerX - radius);
+         x <= min(63, centerX + radius); ++x) {
+      const int dx = x - centerX;
+      const int dy = y - centerY;
+      const int distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared <= outerSquared && distanceSquared >= innerSquared)
+        cinematicPixel(x, y, color);
+    }
+  }
+}
+
+void cinematicLine(int x0, int y0, int x1, int y1,
+                   CinematicColor color) {
+  const int dx = abs(x1 - x0);
+  const int stepX = x0 < x1 ? 1 : -1;
+  const int dy = -abs(y1 - y0);
+  const int stepY = y0 < y1 ? 1 : -1;
+  int error = dx + dy;
+  for (;;) {
+    cinematicPixel(x0, y0, color);
+    if (x0 == x1 && y0 == y1) break;
+    const int doubledError = error * 2;
+    if (doubledError >= dy) {
+      error += dy;
+      x0 += stepX;
+    }
+    if (doubledError <= dx) {
+      error += dx;
+      y0 += stepY;
+    }
+  }
+}
+
+CinematicColor cinematicBlend(CinematicColor from, CinematicColor to,
+                               uint8_t amount) {
+  const uint16_t inverse = 255 - amount;
+  return {
+    static_cast<uint8_t>((from.red * inverse + to.red * amount) / 255),
+    static_cast<uint8_t>((from.green * inverse + to.green * amount) / 255),
+    static_cast<uint8_t>((from.blue * inverse + to.blue * amount) / 255)
+  };
+}
+
+void cinematicTexturedFireball(int centerX, int centerY, int radius,
+                               uint32_t age,
+                               const CinematicColor *palette) {
+  if (radius <= 0) return;
+  const int radiusSquared = radius * radius;
+  const uint8_t animationFrame = age /
+      max<uint32_t>(1, renderIntervalUs / 1000UL);
+  for (int y = max(0, centerY - radius);
+       y <= min(63, centerY + radius); ++y) {
+    for (int x = max(0, centerX - radius);
+         x <= min(63, centerX + radius); ++x) {
+      const int dx = x - centerX;
+      const int dy = y - centerY;
+      const int distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared > radiusSquared) continue;
+
+      const int distance = lroundf(sqrtf(distanceSquared));
+      // Two deterministic noise scales break up the radial bands. Advancing
+      // once per presented DMA-safe frame makes the fire boil without
+      // high-frequency
+      // shimmer that the HUB75 panel cannot reproduce cleanly.
+      const uint8_t fineHash = static_cast<uint8_t>(
+          x * 37 + y * 73 + animationFrame * 29 + (x * y * 3));
+      const uint8_t coarseHash = static_cast<uint8_t>(
+          (x / 3) * 61 + (y / 3) * 43 + animationFrame * 11);
+      const int turbulence = (fineHash & 31) - 15 +
+                             ((coarseHash & 15) - 7) * 2;
+      const int heat = constrain(255 - distance * 255 / max(1, radius) +
+                                     turbulence, 0, 255);
+      const uint8_t section = min(3, heat >> 6);
+      const uint8_t blend = (heat & 63) * 4;
+      CinematicColor color = cinematicBlend(
+          palette[section], palette[section + 1], blend);
+
+      // Sparse hotter pockets and dark soot holes add sub-lobe detail without
+      // flattening the carefully graded temperature palette.
+      if ((fineHash & 63) == 0)
+        color = cinematicBlend(color, palette[4], 115);
+      else if ((fineHash & 63) == 1)
+        color = cinematicBlend(color, palette[0], 150);
+      cinematicPixel(x, y, color);
+    }
+  }
+}
+
 void drawEarthExplosion(uint32_t age) {
   constexpr int centerX = 31;
   constexpr int centerY = 49;
-  const uint16_t deepRed = rgb(145, 0, 20);
-  const uint16_t hotRed = rgb(255, 35, 0);
-  const uint16_t orange = rgb(255, 120, 0);
-  const uint16_t yellow = rgb(255, 245, 20);
-  const uint16_t whiteHot = rgb(255, 255, 255);
+  // Incandescent fire grades from soot and dark red through orange and amber
+  // into a warm white core. These deliberately non-RGB565 values are sent
+  // straight to the eight-bit cinematic DMA planes.
+  constexpr CinematicColor smoke{34, 25, 29};
+  constexpr CinematicColor smokeHot{73, 38, 25};
+  constexpr CinematicColor deepRed{126, 9, 3};
+  constexpr CinematicColor hotRed{238, 38, 2};
+  constexpr CinematicColor orange{255, 104, 3};
+  constexpr CinematicColor amber{255, 188, 24};
+  constexpr CinematicColor yellow{255, 232, 92};
+  constexpr CinematicColor whiteHot{255, 250, 220};
+  constexpr CinematicColor firePalette[5] = {
+    smoke, deepRed, hotRed, amber, whiteHot
+  };
   const int radius = min<uint32_t>(36, 3 + age / 43);
   const int pulse = ((age / 70) & 1) ? 1 : 0;
 
-  // Multiple offset fireballs create an irregular blast substantially larger
-  // than the planet it replaces—the intended arcade-comedy exaggeration.
-  display->fillCircle(centerX, centerY, radius, deepRed);
+  // A dirty smoke envelope makes the inner fire look brighter and more like a
+  // physical fuel/atmosphere explosion, while remaining absurdly oversized.
+  cinematicTexturedFireball(centerX, centerY, radius, age, firePalette);
   constexpr int8_t lobeX[8] = {-4, -3, 0, 3, 4, 3, 0, -3};
   constexpr int8_t lobeY[8] = {0, -3, -4, -3, 0, 3, 4, 3};
   const int lobeDistance = max(2, radius * 3 / 4);
   const int lobeRadius = max(2, radius / 3 + pulse);
   for (uint8_t lobe = 0; lobe < 8; ++lobe) {
-    display->fillCircle(centerX + lobeX[lobe] * lobeDistance / 4,
-                        centerY + lobeY[lobe] * lobeDistance / 4,
-                        lobeRadius, lobe & 1 ? hotRed : orange);
+    cinematicTexturedFireball(
+        centerX + lobeX[lobe] * lobeDistance / 4,
+        centerY + lobeY[lobe] * lobeDistance / 4,
+        lobeRadius, age + lobe * 47, firePalette);
   }
-  display->fillCircle(centerX, centerY, max(2, radius * 2 / 3), orange);
-  display->fillCircle(centerX - pulse, centerY + pulse,
-                      max(1, radius / 2), yellow);
-  display->fillCircle(centerX + pulse, centerY - pulse,
-                      max(1, radius / 4), whiteHot);
+
+  // Secondary smoke mushrooms roll upward at different rates instead of
+  // leaving one perfectly circular cloud.
+  constexpr int8_t smokeX[6] = {-5, -3, -1, 2, 4, 6};
+  constexpr int8_t smokeY[6] = {-2, -5, -7, -6, -4, -1};
+  const int smokeLift = min<uint32_t>(10, age / 150);
+  for (uint8_t puff = 0; puff < 6; ++puff) {
+    const int puffRadius = max(2, radius / 5 + (puff % 3));
+    cinematicFillCircle(centerX + smokeX[puff] * radius / 10,
+                        centerY + smokeY[puff] * radius / 10 - smokeLift,
+                        puffRadius, puff & 1 ? smoke : smokeHot);
+  }
+  // Small moving hotspots replace the previous large flat-colour cores.
+  cinematicFillCircle(centerX - pulse, centerY - pulse,
+                      max(1, radius / 8), whiteHot);
+  cinematicFillCircle(centerX + radius / 5, centerY - radius / 6,
+                      max(1, radius / 10), yellow);
+
+  // Two separately expanding pressure fronts give the blast a readable snap.
+  cinematicCircle(centerX, centerY, min(43, radius + 2), smokeHot);
+  if (age < 720)
+    cinematicCircle(centerX, centerY, min(40, radius + 5),
+                    age < 300 ? whiteHot : amber);
 
   // Recognisable ocean, atmosphere, and land fragments keep the joke legible:
   // this is Earth coming apart, not merely a generic fireball.
@@ -1880,22 +2120,42 @@ void drawEarthExplosion(uint32_t age) {
   constexpr int8_t velocityY[12] = {
     -3, -1, 2, 4, 4, 2, -1, -3, -4, -4, 3, 3
   };
-  const uint16_t fragmentColors[4] = {
-    rgb(0, 180, 255), rgb(0, 55, 210),
-    rgb(35, 220, 70), rgb(150, 255, 50)
+  constexpr CinematicColor fragmentColors[4] = {
+    {0, 184, 255}, {4, 51, 211}, {31, 222, 68}, {149, 255, 47}
   };
   const int travel = 4 + age / 45;
   for (uint8_t piece = 0; piece < 12; ++piece) {
     const int x = centerX + velocityX[piece] * travel / 3;
     const int y = centerY + velocityY[piece] * travel / 3;
-    if (x >= 0 && x < 63 && y >= 0 && y < 63)
-      display->fillRect(x, y, 2, 2, fragmentColors[piece % 4]);
+    const int tailX = centerX + velocityX[piece] * max(0, travel - 4) / 3;
+    const int tailY = centerY + velocityY[piece] * max(0, travel - 4) / 3;
+    cinematicLine(tailX, tailY, x, y,
+                  piece & 1 ? deepRed : orange);
+    if (x >= 0 && x < 63 && y >= 0 && y < 63) {
+      cinematicFillRect(x, y, 2, 2, fragmentColors[piece % 4]);
+      cinematicPixel(x, y, piece & 1 ? whiteHot : yellow);
+    }
+  }
+
+  // Directional incandescent ejecta read more clearly than random single
+  // pixels and leave short hot trails as they cross the smoke envelope.
+  constexpr int8_t sparkVX[12] = {-6, -5, -4, -2, -1, 1,
+                                   2, 4, 5, 6, -3, 3};
+  constexpr int8_t sparkVY[12] = {-2, -5, 1, -6, 5, -5,
+                                   6, -3, 2, 5, 6, -6};
+  const int sparkTravel = 3 + age / 32;
+  for (uint8_t spark = 0; spark < 12; ++spark) {
+    const int x = centerX + sparkVX[spark] * sparkTravel / 4;
+    const int y = centerY + sparkVY[spark] * sparkTravel / 4;
+    const int tailX = centerX + sparkVX[spark] * max(0, sparkTravel - 3) / 4;
+    const int tailY = centerY + sparkVY[spark] * max(0, sparkTravel - 3) / 4;
+    cinematicLine(tailX, tailY, x, y, spark & 1 ? amber : whiteHot);
   }
 
   for (uint8_t spark = 0; spark < 10; ++spark) {
     const int x = (centerX + spark * 19 + age / 17) % 64;
     const int y = (centerY + spark * 13 + age / 29) % 64;
-    display->drawPixel(x, y, spark & 1 ? yellow : whiteHot);
+    cinematicPixel(x, y, spark & 1 ? amber : whiteHot);
   }
 }
 
@@ -1904,11 +2164,11 @@ void drawEarthTargetBeams(int commanderY, uint32_t age) {
                              0.0f, 1.0f);
   progress = progress * progress * (3.0f - 2.0f * progress);
   constexpr int impactX[3] = {23, 31, 39};
-  const uint16_t outerColors[3] = {
-    rgb(255, 30, 25), rgb(255, 190, 0), rgb(0, 135, 255)
+  constexpr CinematicColor outerColors[3] = {
+    {255, 27, 19}, {255, 186, 3}, {0, 131, 255}
   };
-  const uint16_t coreColors[3] = {
-    rgb(255, 150, 80), rgb(255, 255, 120), rgb(100, 255, 255)
+  constexpr CinematicColor coreColors[3] = {
+    {255, 154, 79}, {255, 250, 117}, {98, 255, 252}
   };
   for (uint8_t lane = 0; lane < 3; ++lane) {
     const int startX = laneX(static_cast<Lane>(lane));
@@ -1918,87 +2178,141 @@ void drawEarthTargetBeams(int commanderY, uint32_t age) {
     // Five-pixel coloured envelope plus a white-hot core is deliberately
     // excessive, while the converging geometry still reads as turret fire.
     for (int thickness = -2; thickness <= 2; ++thickness)
-      display->drawLine(startX + thickness, startY,
-                        endX + thickness / 2, endY, outerColors[lane]);
-    display->drawLine(startX, startY, endX, endY, coreColors[lane]);
-    display->fillCircle(endX, endY, progress > 0.8f ? 3 : 1,
+      cinematicLine(startX + thickness, startY,
+                    endX + thickness / 2, endY, outerColors[lane]);
+    cinematicLine(startX, startY, endX, endY, coreColors[lane]);
+    cinematicFillCircle(endX, endY, progress > 0.8f ? 3 : 1,
                         coreColors[lane]);
     if (progress > 0.88f)
-      display->drawCircle(impactX[lane], 42, 4 + ((age / 55) & 1),
-                          rgb(255, 255, 255));
+      cinematicCircle(impactX[lane], 42, 4 + ((age / 55) & 1),
+                      {255, 251, 229});
   }
 }
 
 void drawEarthVictoryCannon(uint32_t attackAge) {
-  // Earth returns with a turret intentionally far too large for the planet.
-  drawCinematicEarth(52, 12, attackAge / 60);
+  // Earth sits low in the frame so the defence cannon and its deliberately
+  // excessive shot have a longer, clearer vertical silhouette.
+  constexpr int earthCenterY = 65;
+  constexpr int turretShiftY = 13;
+  constexpr int muzzleY = 19 + turretShiftY;
+  constexpr int beamTargetY = 6;
+  drawCinematicEarth(earthCenterY, 12, attackAge / 60);
   const uint16_t darkMetal = rgb(20, 35, 105);
   const uint16_t metal = rgb(80, 120, 210);
   const uint16_t highlight = rgb(170, 235, 255);
-  const uint16_t chargeColor = ((attackAge / 70) & 1)
-                                   ? rgb(255, 255, 255)
-                                   : rgb(0, 255, 255);
-  display->fillRect(22, 39, 19, 6, darkMetal);
-  display->fillRect(24, 37, 15, 5, metal);
-  display->drawFastHLine(25, 37, 13, highlight);
-  display->fillRect(27, 29, 9, 9, darkMetal);
-  display->fillRect(28, 27, 7, 10, metal);
-  display->drawFastVLine(29, 28, 8, highlight);
-  display->fillRect(29, 20, 5, 9, darkMetal);
-  display->fillRect(30, 19, 3, 9, highlight);
+  display->fillRect(22, 39 + turretShiftY, 19, 6, darkMetal);
+  display->fillRect(24, 37 + turretShiftY, 15, 5, metal);
+  display->drawFastHLine(25, 37 + turretShiftY, 13, highlight);
+  display->fillRect(27, 29 + turretShiftY, 9, 9, darkMetal);
+  display->fillRect(28, 27 + turretShiftY, 7, 10, metal);
+  display->drawFastVLine(29, 28 + turretShiftY, 8, highlight);
+  display->fillRect(29, 20 + turretShiftY, 5, 9, darkMetal);
+  display->fillRect(30, muzzleY, 3, 9, highlight);
 
   float fire = constrain(attackAge /
                              static_cast<float>(EARTH_COUNTERATTACK_MS),
                          0.0f, 1.0f);
   fire = fire * fire * (3.0f - 2.0f * fire);
-  display->fillCircle(31, 19, 2 + ((attackAge / 80) & 1), chargeColor);
+  cinematicFillCircle(31, muzzleY, 2 + ((attackAge / 80) & 1),
+                      ((attackAge / 70) & 1)
+                          ? CinematicColor{255, 255, 255}
+                          : CinematicColor{0, 255, 251});
   if (fire <= 0.02f) return;
 
-  const int beamTop = lroundf(19 + (8 - 19) * fire);
+  const int beamTop = lroundf(muzzleY + (beamTargetY - muzzleY) * fire);
   // A nine-pixel plasma envelope with a five-pixel white/cyan core dwarfs the
-  // cannon barrel but still follows a sensible straight shot into the cockpit.
-  display->fillRect(27, beamTop, 9, 20 - beamTop, rgb(0, 90, 255));
-  display->fillRect(29, beamTop, 5, 20 - beamTop, rgb(0, 255, 255));
-  display->fillRect(30, beamTop, 3, 20 - beamTop, rgb(255, 255, 255));
-  display->fillCircle(31, beamTop, fire > 0.85f ? 5 : 3, chargeColor);
+  // cannon barrel, crosses the commander's cockpit, and visibly originates at
+  // the lowered muzzle rather than appearing as a detached screen effect.
+  const int beamHeight = muzzleY - beamTop + 1;
+  cinematicFillRect(27, beamTop, 9, beamHeight, {0, 86, 255});
+  cinematicFillRect(29, beamTop, 5, beamHeight, {0, 255, 249});
+  cinematicFillRect(30, beamTop, 3, beamHeight, {255, 254, 235});
+  cinematicFillCircle(31, beamTop, fire > 0.85f ? 5 : 3,
+                      {255, 248, 213});
   if (fire > 0.88f)
-    display->drawCircle(31, 11, 6 + ((attackAge / 45) & 1),
-                        rgb(255, 255, 255));
+    cinematicCircle(31, 10, 6 + ((attackAge / 45) & 1),
+                    {255, 252, 225});
 }
 
 void drawInvaderExplosion(uint32_t age) {
   constexpr int centerX = 31;
   constexpr int centerY = 12;
-  const uint16_t alienGreen = rgb(70, 255, 35);
-  const uint16_t toxicLime = rgb(210, 255, 20);
-  const uint16_t plasmaCyan = rgb(0, 230, 255);
-  const uint16_t plasmaPurple = rgb(210, 30, 255);
-  const uint16_t whiteHot = rgb(255, 255, 255);
+  constexpr CinematicColor smoke{32, 24, 34};
+  constexpr CinematicColor emberRed{174, 19, 4};
+  constexpr CinematicColor fireOrange{255, 91, 3};
+  constexpr CinematicColor fireAmber{255, 194, 31};
+  constexpr CinematicColor whiteHot{255, 252, 224};
+  constexpr CinematicColor alienGreen{66, 255, 31};
+  constexpr CinematicColor toxicLime{205, 255, 18};
+  constexpr CinematicColor plasmaCyan{0, 226, 255};
+  constexpr CinematicColor plasmaPurple{205, 27, 255};
+  constexpr CinematicColor firePalette[5] = {
+    smoke, emberRed, fireOrange, fireAmber, whiteHot
+  };
+  constexpr CinematicColor plasmaPalette[5] = {
+    smoke, plasmaPurple, plasmaCyan, toxicLime, whiteHot
+  };
   const int radius = min<uint32_t>(34, 4 + age / 38);
   const int pulse = ((age / 55) & 1) ? 2 : 0;
 
-  // Expanding toxic plasma rings and asymmetric lobes make the commander's
-  // destruction intentionally much larger than its original sprite.
-  display->fillCircle(centerX, centerY, radius, plasmaPurple);
+  // The conventional smoke/fire temperature stack sells the blast as an
+  // explosion; toxic green, cyan, and purple lobes make its alien fuel fail in
+  // the least restrained Space-Invaders fashion possible.
+  cinematicTexturedFireball(centerX, centerY, radius, age, firePalette);
   constexpr int8_t lobeX[10] = {-5, -4, -2, 1, 4, 5, 3, 0, -3, -5};
   constexpr int8_t lobeY[10] = {-1, -4, -5, -5, -3, 1, 4, 5, 4, 2};
   const int reach = max(3, radius * 4 / 5);
   for (uint8_t lobe = 0; lobe < 10; ++lobe) {
-    const uint16_t color = lobe % 3 == 0 ? alienGreen :
-                           lobe % 3 == 1 ? plasmaCyan : toxicLime;
-    display->fillCircle(centerX + lobeX[lobe] * reach / 5,
-                        centerY + lobeY[lobe] * reach / 5,
-                        max(2, radius / 3 + (lobe & 1)), color);
+    cinematicTexturedFireball(
+        centerX + lobeX[lobe] * reach / 5,
+        centerY + lobeY[lobe] * reach / 5,
+        max(2, radius / 3 + (lobe & 1)), age + lobe * 53,
+        lobe % 3 == 1 ? firePalette : plasmaPalette);
   }
-  display->drawCircle(centerX, centerY, max(2, radius - pulse), whiteHot);
-  display->fillCircle(centerX, centerY, max(2, radius / 2), toxicLime);
-  display->fillCircle(centerX, centerY, max(1, radius / 4), whiteHot);
+  cinematicFillCircle(centerX - pulse, centerY + pulse,
+                      max(1, radius / 8), whiteHot);
+  cinematicFillCircle(centerX + radius / 5, centerY - radius / 5,
+                      max(1, radius / 10), alienGreen);
+  cinematicCircle(centerX, centerY, max(2, radius - pulse), toxicLime);
+
+  // A hot pressure ring is followed by a slower alien-plasma ring. Their
+  // different expansion rates keep the detonation legible frame by frame.
+  if (age < 650)
+    cinematicCircle(centerX, centerY, min(42, radius + 5), whiteHot);
+  cinematicCircle(centerX, centerY,
+                  min(44, radius + 3 + static_cast<int>((age / 95) & 3)),
+                  (age / 90) & 1 ? plasmaCyan : plasmaPurple);
+
+  // Jagged electrical discharge escapes the ruptured command core. Each bolt
+  // has a bent middle segment so it reads as electricity rather than shrapnel.
+  constexpr int8_t boltX[8] = {-6, -5, -2, 2, 5, 6, 3, -3};
+  constexpr int8_t boltY[8] = {-2, -5, -6, -6, -4, 1, 6, 6};
+  const int boltReach = max(4, radius + static_cast<int>((age / 40) & 3));
+  for (uint8_t bolt = 0; bolt < 8; ++bolt) {
+    const int endX = centerX + boltX[bolt] * boltReach / 6;
+    const int endY = centerY + boltY[bolt] * boltReach / 6;
+    const int bendX = centerX + boltX[bolt] * boltReach / 12 +
+                      (bolt & 1 ? 2 : -2);
+    const int bendY = centerY + boltY[bolt] * boltReach / 12 +
+                      (bolt & 2 ? 1 : -1);
+    const CinematicColor boltColor = bolt & 1 ? plasmaCyan : toxicLime;
+    cinematicLine(centerX, centerY, bendX, bendY, whiteHot);
+    cinematicLine(bendX, bendY, endX, endY, boltColor);
+  }
+
+  // Small scorched smoke cells interrupt the saturated plasma and add depth.
+  for (uint8_t puff = 0; puff < 6; ++puff) {
+    const int puffX = centerX + lobeX[puff] * radius / 7;
+    const int puffY = centerY + lobeY[puff] * radius / 7 - age / 220;
+    cinematicFillCircle(puffX, puffY, max(1, radius / 7 + (puff & 1)),
+                        puff & 1 ? smoke : emberRed);
+  }
 
   // Armour and all three coloured turrets remain identifiable as oversized
   // chunks sailing away from the blast.
-  const uint16_t chunkColors[7] = {
-    alienGreen, rgb(0, 105, 115), plasmaPurple,
-    rgb(255, 45, 35), rgb(255, 205, 0), rgb(0, 145, 255), whiteHot
+  constexpr CinematicColor chunkColors[7] = {
+    alienGreen, {0, 103, 117}, plasmaPurple,
+    {255, 43, 31}, {255, 203, 17}, {0, 143, 255}, whiteHot
   };
   constexpr int8_t velocityX[14] = {
     -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, -4, 4, -2, 2
@@ -2010,15 +2324,33 @@ void drawInvaderExplosion(uint32_t age) {
   for (uint8_t piece = 0; piece < 14; ++piece) {
     const int x = centerX + velocityX[piece] * travel / 3;
     const int y = centerY + velocityY[piece] * travel / 3;
-    if (x >= 0 && x < 62 && y >= 0 && y < 62)
-      display->fillRect(x, y, piece % 3 == 0 ? 3 : 2, 2,
+    const int tailX = centerX + velocityX[piece] * max(0, travel - 4) / 3;
+    const int tailY = centerY + velocityY[piece] * max(0, travel - 4) / 3;
+    cinematicLine(tailX, tailY, x, y,
+                  piece & 1 ? fireOrange : plasmaPurple);
+    if (x >= 0 && x < 62 && y >= 0 && y < 62) {
+      cinematicFillRect(x, y, piece % 3 == 0 ? 3 : 2, 2,
                         chunkColors[piece % 7]);
+      cinematicPixel(x, y, piece % 3 ? fireAmber : whiteHot);
+    }
+  }
+
+  constexpr int8_t microSparkX[12] = {-7, -6, -4, -2, 1, 3,
+                                       5, 7, 6, 3, -1, -5};
+  constexpr int8_t microSparkY[12] = {-1, -5, 4, -7, 7, -6,
+                                       4, 0, -4, 7, -7, 6};
+  const int microTravel = 2 + age / 29;
+  for (uint8_t spark = 0; spark < 12; ++spark) {
+    const int x = centerX + microSparkX[spark] * microTravel / 5;
+    const int y = centerY + microSparkY[spark] * microTravel / 5;
+    cinematicPixel(x, y, spark % 3 == 0 ? whiteHot :
+                         spark & 1 ? plasmaCyan : fireAmber);
   }
 
   for (uint8_t spark = 0; spark < 18; ++spark) {
     const int x = (centerX + spark * 23 + age / 13) % 64;
     const int y = (centerY + spark * 17 + age / 19) % 64;
-    display->drawPixel(x, y, spark & 1 ? plasmaCyan : toxicLime);
+    cinematicPixel(x, y, spark & 1 ? fireAmber : plasmaCyan);
   }
 }
 
@@ -2130,7 +2462,8 @@ void releaseDisplayBuffers() {
   activeDisplayProfile = DisplayProfile::None;
 }
 
-bool allocateDisplayBuffers(uint8_t colorDepth) {
+bool allocateDisplayBuffers(uint8_t colorDepth,
+                            uint16_t minimumPanelRefreshHz) {
   HUB75_I2S_CFG config(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
   config.gpio.r1 = HUB75_R1;
   config.gpio.g1 = HUB75_G1;
@@ -2148,7 +2481,7 @@ bool allocateDisplayBuffers(uint8_t colorDepth) {
   config.gpio.clk = HUB75_CLK;
   config.double_buff = true;
   config.i2sspeed = HUB75_I2S_CFG::HZ_8M;
-  config.min_refresh_rate = 120;
+  config.min_refresh_rate = minimumPanelRefreshHz;
   config.setPixelColorDepthBits(colorDepth);
   config.latch_blanking = 2;
   config.clkphase = false;
@@ -2173,7 +2506,10 @@ bool allocateDisplayBuffers(uint8_t colorDepth) {
 
   dmaDisplay = newDma;
   display = newVirtual;
-  activeDmaColorDepth = colorDepth;
+  // Read the accepted value back from the live driver configuration. This is
+  // the actual number of per-channel BCM bitplanes in the allocated buffers,
+  // not merely the depth the caller requested.
+  activeDmaColorDepth = dmaDisplay->getCfg().getPixelColorDepthBits();
   if (dmaDisplay->calculated_refresh_rate > 0) {
     const uint32_t panelFrameUs =
         1000000UL / dmaDisplay->calculated_refresh_rate;
@@ -2184,19 +2520,51 @@ bool allocateDisplayBuffers(uint8_t colorDepth) {
   return true;
 }
 
+void refreshDmaBuffers() {
+  if (display == nullptr || dmaDisplay == nullptr) return;
+  // Clear and present both halves of the double buffer. Rebuilding on entry
+  // and exit plus this two-buffer refresh prevents a low-colour gameplay frame
+  // or an explosion frame from surviving the colour-space transition.
+  display->clearScreen();
+  dmaDisplay->flipDMABuffer();
+  display->clearScreen();
+  dmaDisplay->flipDMABuffer();
+}
+
+const char *displayProfileName(DisplayProfile profile) {
+  return profile == DisplayProfile::Select ? "selection" :
+         profile == DisplayProfile::Cinematic ? "cinematic" : "game";
+}
+
+void runCinematicAtDmaCap() {
+  if (dmaDisplay == nullptr || dmaDisplay->calculated_refresh_rate <= 0)
+    return;
+  // Do not flip faster than the panel can scan a complete eight-bit frame.
+  // A short guard absorbs ISR and loop jitter without imposing an arbitrary
+  // animation cap below the measured DMA capability.
+  const uint32_t panelFrameUs =
+      1000000UL / dmaDisplay->calculated_refresh_rate;
+  renderIntervalUs = max<uint32_t>(5000UL, panelFrameUs + 1500UL);
+}
+
 bool rebuildDisplay(DisplayProfile profile) {
   if (profile == activeDisplayProfile && display != nullptr &&
       dmaDisplay != nullptr) return true;
 
-  const uint8_t requestedDepth = profile == DisplayProfile::Select
-                                     ? SELECT_COLOR_DEPTH_BITS
-                                     : GAME_COLOR_DEPTH_BITS;
+  const uint8_t requestedDepth = profile == DisplayProfile::Game
+                                     ? GAME_COLOR_DEPTH_BITS
+                                     : profile == DisplayProfile::Cinematic
+                                           ? CINEMATIC_COLOR_DEPTH_BITS
+                                           : SELECT_COLOR_DEPTH_BITS;
+  // A 90 Hz scan floor avoids visible flicker while retaining eight cinematic
+  // PWM planes. Presentation follows the measured complete-frame DMA rate.
+  const uint16_t minimumPanelRefreshHz =
+      profile == DisplayProfile::Cinematic ? 90 : 120;
   releaseDisplayBuffers();
   // Give the I2S DMA driver a scheduling point after releasing its descriptors
   // before allocating a differently-sized set of buffers.
   delay(10);
-  uint8_t allocatedDepth = requestedDepth;
-  if (!allocateDisplayBuffers(requestedDepth)) {
+  if (!allocateDisplayBuffers(requestedDepth, minimumPanelRefreshHz)) {
     // The first select-to-game transition can briefly leave released DMA heap
     // blocks unavailable. Retry the smaller gameplay allocation once after the
     // allocator has had another scheduling interval; otherwise EASY can be
@@ -2205,35 +2573,48 @@ bool rebuildDisplay(DisplayProfile profile) {
       Serial.printf("Gameplay DMA retry; heap=%u largest=%u\n",
                     ESP.getFreeHeap(), ESP.getMaxAllocHeap());
       delay(25);
-      if (allocateDisplayBuffers(requestedDepth)) {
-        activeDmaColorDepth = requestedDepth;
+      if (allocateDisplayBuffers(requestedDepth, minimumPanelRefreshHz)) {
         activeDisplayProfile = profile;
+        refreshDmaBuffers();
         Serial.printf("HUB75 game buffers recovered: %u-bit colour, %u Hz\n",
                       activeDmaColorDepth,
                       dmaDisplay->calculated_refresh_rate);
         return true;
       }
     }
-    // Selection can still operate if eight-bit double buffering does not fit
-    // on a particular ESP32 revision. Do not repeatedly retry every frame.
-    if (profile != DisplayProfile::Select ||
-        !allocateDisplayBuffers(6)) {
+    if (profile == DisplayProfile::Cinematic) {
+      // DMA heap blocks can take a scheduling interval to coalesce after the
+      // five-bit gameplay buffers are destroyed. Retry the required eight-bit
+      // allocation before considering the degraded emergency path.
+      for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+        delay(35);
+        if (!allocateDisplayBuffers(CINEMATIC_COLOR_DEPTH_BITS,
+                                    minimumPanelRefreshHz))
+          continue;
+        activeDisplayProfile = profile;
+        refreshDmaBuffers();
+        runCinematicAtDmaCap();
+        return true;
+      }
+    }
+    // High-colour screens can still operate at six bits on ESP32 revisions
+    // with unusually fragmented DMA memory. Do not repeatedly retry per frame.
+    if (profile == DisplayProfile::Game ||
+        !allocateDisplayBuffers(6, minimumPanelRefreshHz)) {
       Serial.println(F("HUB75 DMA buffer rebuild failed"));
       return false;
     }
-    allocatedDepth = 6;
-    Serial.println(F("HUB75 selection buffer fell back to 6-bit colour"));
+    Serial.printf("HUB75 %s buffer fell back to 6-bit colour\n",
+                  displayProfileName(profile));
   }
-  activeDmaColorDepth = allocatedDepth;
   activeDisplayProfile = profile;
-  if (profile == DisplayProfile::Select) {
-    // Covers and text do not require the gameplay presentation rate. Keep the
-    // panel scanning continuously, but swap completed selection buffers only
-    // at 30 FPS to reduce visible redraw/swap activity.
+  refreshDmaBuffers();
+  if (profile == DisplayProfile::Select)
     renderIntervalUs = max(renderIntervalUs, SELECT_RENDER_INTERVAL_US);
-  }
+  if (profile == DisplayProfile::Cinematic)
+    runCinematicAtDmaCap();
   Serial.printf("HUB75 %s buffers: %u-bit colour, %u Hz, %lu us/frame\n",
-                profile == DisplayProfile::Select ? "selection" : "game",
+                displayProfileName(profile),
                 activeDmaColorDepth,
                 dmaDisplay->calculated_refresh_rate,
                 static_cast<unsigned long>(renderIntervalUs));
@@ -2293,9 +2674,17 @@ void loop() {
   }
   updateRepeatingDemo(now);
 
+  const bool postGameCinematic =
+      (screen == Screen::Failed && now - endShownAt < FAILURE_CINEMATIC_MS) ||
+      (screen == Screen::Results && now - endShownAt < VICTORY_CINEMATIC_MS);
+  const bool openingCinematic =
+      screen == Screen::Playing && !songClockStarted(now) &&
+      now - introStartedAt < GAME_INTRO_MS;
   const DisplayProfile desiredProfile =
       (screen == Screen::Select || screen == Screen::DifficultySelect)
-          ? DisplayProfile::Select : DisplayProfile::Game;
+          ? DisplayProfile::Select
+          : (openingCinematic || postGameCinematic)
+                ? DisplayProfile::Cinematic : DisplayProfile::Game;
   if (desiredProfile != activeDisplayProfile &&
       !rebuildDisplay(desiredProfile)) {
     delay(100);
