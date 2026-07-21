@@ -145,6 +145,7 @@ constexpr uint8_t SELECT_COLOR_DEPTH_BITS = 8;
 constexpr uint8_t GAME_COLOR_DEPTH_BITS = 5;
 constexpr uint8_t CINEMATIC_COLOR_DEPTH_BITS = 8;
 constexpr uint32_t SELECT_RENDER_INTERVAL_US = 33333UL;  // 30 FPS
+constexpr uint32_t CINEMATIC_RENDER_INTERVAL_US = 33333UL;  // 30 FPS
 constexpr int32_t SAFE_ZONE_LEAD_MS =
     NOTE_TRAVEL_MS * (NOTE_HIT_Y - GIMMICK_SAFE_ZONE_Y) /
     (NOTE_HIT_Y - NOTE_TOP_Y);
@@ -211,6 +212,8 @@ PullState previousPullState = PullState::Rest;
 volatile uint32_t runStartedAt = 0;
 volatile uint32_t runStartedAtUs = 0;
 volatile bool songClockActive = false;
+bool openingCinematicActive = false;
+bool openingCinematicStarted = false;
 uint32_t introStartedAt = 0;
 uint32_t pausedAt = 0;
 uint32_t pausedAtUs = 0;
@@ -534,10 +537,12 @@ bool startRun(uint32_t now) {
     laneJudgmentShownAt[lane] = 0;
   }
   previousPullState = readPullState();
-  introStartedAt = now;
+  introStartedAt = 0;
   runStartedAt = 0;
   runStartedAtUs = 0;
   songClockActive = false;
+  openingCinematicActive = true;
+  openingCinematicStarted = false;
   ++audioRunGeneration;
   screen = Screen::Playing;
   return true;
@@ -1651,6 +1656,11 @@ void drawGimmickEffect(uint32_t now, uint32_t t) {
 void drawGameIntro(uint32_t now) {
   const uint32_t age = now - introStartedAt;
   display->fillScreen(0);
+  const uint32_t fadeStartedAt = GAME_INTRO_HOLD_MS + GAME_INTRO_RETREAT_MS;
+  const uint8_t starFade = age <= fadeStartedAt ? 255 :
+      age >= GAME_INTRO_MS ? 0 :
+      static_cast<uint8_t>((GAME_INTRO_MS - age) * 255 /
+                           GAME_INTRO_READY_MS);
 
   // RGB888 stars vary in temperature and twinkle at the DMA-safe cinematic
   // cadence. A few dim coloured dust pixels add depth while
@@ -1658,7 +1668,8 @@ void drawGameIntro(uint32_t now) {
   for (uint8_t i = 0; i < 22; ++i) {
     const int x = (i * 17 + 5) % 64;
     const int y = (i * 11 + 3) % 54;
-    const uint8_t twinkle = 105 + ((i * 37 + age / 66) & 63);
+    const uint8_t twinkle =
+        (105 + ((i * 37 + age / 66) & 63)) * starFade / 255;
     if (activeDmaColorDepth >= CINEMATIC_COLOR_DEPTH_BITS) {
       const uint8_t red = i % 3 == 0 ? twinkle : twinkle * 3 / 5;
       const uint8_t green = i % 3 == 1 ? twinkle : twinkle * 4 / 5;
@@ -1674,8 +1685,9 @@ void drawGameIntro(uint32_t now) {
       const int x = (dust * 29 + 9) % 64;
       const int y = (dust * 19 + 7) % 48;
       display->drawPixelRGB888(x, y,
-          dust & 1 ? 24 : 47, dust & 1 ? 18 : 31,
-          dust & 1 ? 72 : 91);
+          (dust & 1 ? 24 : 47) * starFade / 255,
+          (dust & 1 ? 18 : 31) * starFade / 255,
+          (dust & 1 ? 72 : 91) * starFade / 255);
     }
   }
 
@@ -1707,17 +1719,9 @@ void drawGameIntro(uint32_t now) {
                   ((age / 220) & 1) != 0, noFire, launchY);
   drawCinematicEarth(earthY, earthRadius, age / 70);
 
-  // The final beat of the cinematic presents an empty, ready playfield. Both
-  // actors have cleared the matrix before the song and first notes can begin.
-  if (age >= GAME_INTRO_HOLD_MS + GAME_INTRO_RETREAT_MS) {
-    const uint16_t laneWall = rgb(0, 42, 125);
-    for (int x : {0, 21, 41, 63})
-      display->drawFastVLine(x, NOTE_TOP_Y,
-                             NOTE_HIT_Y - NOTE_TOP_Y + 1, laneWall);
-    for (uint8_t lane = 0; lane < 3; ++lane)
-      display->drawFastHLine(LANE_LEFT_X[lane], NOTE_HIT_Y,
-                             LANE_DRAW_WIDTH[lane], rgb(255, 255, 255));
-  }
+  // The final beat fades to the same black used to initialise the gameplay
+  // buffers. Lane walls are deliberately drawn only after that rebuild, so a
+  // refresh can no longer produce a bars -> black -> bars flash.
 }
 
 float noteYFromTimeUntil(float untilMs, int noteTopY) {
@@ -1735,10 +1739,24 @@ float noteYFromTimeUntil(float untilMs, int noteTopY) {
 }
 
 void drawPlaying(uint32_t now) {
-  if (!songClockStarted(now)) {
+  if (openingCinematicActive) {
+    if (!openingCinematicStarted) {
+      // The cinematic duration begins only when its first completed RGB888
+      // frame is about to be presented, never while DMA is still transitioning.
+      introStartedAt = now;
+      openingCinematicStarted = true;
+    }
     drawGameIntro(now);
-    if (now - introStartedAt >= GAME_INTRO_MS)
+    if (now - introStartedAt >= GAME_INTRO_MS &&
+        activeDisplayProfile == DisplayProfile::Game) {
+      openingCinematicActive = false;
+      openingCinematicStarted = false;
       beginSongClock(now);
+    }
+    return;
+  }
+  if (!songClockStarted(now)) {
+    display->fillScreen(0);
     return;
   }
   const uint32_t t = songTime(now);
@@ -2561,15 +2579,15 @@ const char *displayProfileName(DisplayProfile profile) {
          profile == DisplayProfile::Cinematic ? "cinematic" : "game";
 }
 
-void runCinematicAtDmaCap() {
+void capCinematicAt30Fps() {
   if (dmaDisplay == nullptr || dmaDisplay->calculated_refresh_rate <= 0)
     return;
-  // Do not flip faster than the panel can scan a complete eight-bit frame.
-  // A short guard absorbs ISR and loop jitter without imposing an arbitrary
-  // animation cap below the measured DMA capability.
+  // Scan the panel independently at high speed, but never present animation
+  // frames faster than 30 FPS or before one complete DMA scan plus its guard.
   const uint32_t panelFrameUs =
       1000000UL / dmaDisplay->calculated_refresh_rate;
-  renderIntervalUs = max<uint32_t>(5000UL, panelFrameUs + 1500UL);
+  renderIntervalUs = max<uint32_t>(CINEMATIC_RENDER_INTERVAL_US,
+                                   panelFrameUs + 1500UL);
 }
 
 bool rebuildDisplay(DisplayProfile profile) {
@@ -2581,10 +2599,9 @@ bool rebuildDisplay(DisplayProfile profile) {
                                      : profile == DisplayProfile::Cinematic
                                            ? CINEMATIC_COLOR_DEPTH_BITS
                                            : SELECT_COLOR_DEPTH_BITS;
-  // A 90 Hz scan floor avoids visible flicker while retaining eight cinematic
-  // PWM planes. Presentation follows the measured complete-frame DMA rate.
-  const uint16_t minimumPanelRefreshHz =
-      profile == DisplayProfile::Cinematic ? 90 : 120;
+  // All profiles use a 120 Hz panel scan floor. Cinematic buffer presentation
+  // is capped separately at 30 FPS to reduce redraw bandwidth and flicker.
+  constexpr uint16_t minimumPanelRefreshHz = 120;
   releaseDisplayBuffers();
   // Give the I2S DMA driver a scheduling point after releasing its descriptors
   // before allocating a differently-sized set of buffers.
@@ -2618,7 +2635,7 @@ bool rebuildDisplay(DisplayProfile profile) {
           continue;
         activeDisplayProfile = profile;
         refreshDmaBuffers();
-        runCinematicAtDmaCap();
+        capCinematicAt30Fps();
         return true;
       }
     }
@@ -2637,7 +2654,7 @@ bool rebuildDisplay(DisplayProfile profile) {
   if (profile == DisplayProfile::Select)
     renderIntervalUs = max(renderIntervalUs, SELECT_RENDER_INTERVAL_US);
   if (profile == DisplayProfile::Cinematic)
-    runCinematicAtDmaCap();
+    capCinematicAt30Fps();
   Serial.printf("HUB75 %s buffers: %u-bit colour, %u Hz, %lu us/frame\n",
                 displayProfileName(profile),
                 activeDmaColorDepth,
@@ -2703,8 +2720,8 @@ void loop() {
       (screen == Screen::Failed && now - endShownAt < FAILURE_CINEMATIC_MS) ||
       (screen == Screen::Results && now - endShownAt < VICTORY_CINEMATIC_MS);
   const bool openingCinematic =
-      screen == Screen::Playing && !songClockStarted(now) &&
-      now - introStartedAt < GAME_INTRO_MS;
+      screen == Screen::Playing && openingCinematicActive &&
+      (!openingCinematicStarted || now - introStartedAt < GAME_INTRO_MS);
   const DisplayProfile desiredProfile =
       (screen == Screen::Select || screen == Screen::DifficultySelect)
           ? DisplayProfile::Select
