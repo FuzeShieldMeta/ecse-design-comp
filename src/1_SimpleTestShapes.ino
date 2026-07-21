@@ -110,6 +110,9 @@ constexpr uint16_t HOLD_POINTS_PER_SECOND = 900;
 constexpr int NOTE_WIDTH = 11;
 constexpr int TWIST_REQUIRED_WIDTH = 8;
 constexpr int TWIST_OTHER_WIDTH = 2;
+constexpr int LANE_LEFT_X[3] = {0, 22, 42};
+constexpr int LANE_DRAW_WIDTH[3] = {21, 19, 22};
+constexpr int HEALTH_BAR_WIDTH = 64;
 constexpr uint16_t HEALTH_REGEN_FLASH_MS = 350;
 constexpr uint8_t SELECT_COLOR_DEPTH_BITS = 8;
 constexpr uint8_t GAME_COLOR_DEPTH_BITS = 5;
@@ -460,7 +463,7 @@ void startRun(uint32_t now) {
   healthDamageAt = 0;
   healthAnimationAt = now;
   healthRegenAt = 0;
-  healthRegenFromWidth = healthRegenToWidth = 60;
+  healthRegenFromWidth = healthRegenToWidth = HEALTH_BAR_WIDTH;
   difficulty = songDifficulty(selectedSong);
   lastJudgment = Judgment::None;
   for (uint8_t lane = 0; lane < 3; ++lane) {
@@ -539,8 +542,10 @@ void judge(Judgment result, Lane lane, bool bonus = false) {
     }
     health = min<int16_t>(health, 100);
     if (health > healthBefore) {
-      const uint8_t previousWidth = constrain(healthBefore * 60 / 100, 0, 60);
-      const uint8_t regeneratedWidth = constrain(health * 60 / 100, 0, 60);
+      const uint8_t previousWidth = constrain(
+          healthBefore * HEALTH_BAR_WIDTH / 100, 0, HEALTH_BAR_WIDTH);
+      const uint8_t regeneratedWidth = constrain(
+          health * HEALTH_BAR_WIDTH / 100, 0, HEALTH_BAR_WIDTH);
       if (regeneratedWidth > previousWidth) {
         healthRegenFromWidth = previousWidth;
         healthRegenToWidth = regeneratedWidth;
@@ -1189,10 +1194,10 @@ void drawGimmickEffect(uint32_t now, uint32_t t) {
     for (int lane = firstLane; lane <= lastLane; ++lane) {
       const int x = gimmick.type == GimmickType::ScreenFlash &&
                             gimmick.target < 0
-                        ? 0 : 2 + lane * 20;
+                        ? 0 : LANE_LEFT_X[lane];
       const int width = gimmick.type == GimmickType::ScreenFlash &&
                                 gimmick.target < 0
-                            ? 64 : 19;
+                            ? 64 : LANE_DRAW_WIDTH[lane];
       if (gimmick.pattern == BopImport::GimmickPattern::Solid) {
         display->fillRect(x, 1, width, 63, effectColor);
       } else if (gimmick.pattern == BopImport::GimmickPattern::Stripes) {
@@ -1236,7 +1241,8 @@ void drawPlaying(uint32_t now) {
                  result == Judgment::Good ? rgb(255, 0, 255) :
                                             rgb(255, 80, 0);
     }
-    display->drawFastHLine(2 + laneIndex * 20, NOTE_HIT_Y, 20, barColor);
+    display->drawFastHLine(LANE_LEFT_X[laneIndex], NOTE_HIT_Y,
+                           LANE_DRAW_WIDTH[laneIndex], barColor);
   }
 
   for (size_t i = 0; i < noteCount; ++i) {
@@ -1322,15 +1328,17 @@ void drawPlaying(uint32_t now) {
     displayedHealth = max(static_cast<float>(health),
                           displayedHealth - healthFrameMs * 0.018f);
   }
-  const int healthyWidth = constrain(health * 60 / 100, 0, 60);
+  const int healthyWidth = constrain(
+      health * HEALTH_BAR_WIDTH / 100, 0, HEALTH_BAR_WIDTH);
   const int displayedWidth = constrain(
-      static_cast<int>(lroundf(displayedHealth * 60.0f / 100.0f)), 0, 60);
-  display->drawFastHLine(2, 0, healthyWidth,
+      static_cast<int>(lroundf(displayedHealth * HEALTH_BAR_WIDTH / 100.0f)),
+      0, HEALTH_BAR_WIDTH);
+  display->drawFastHLine(0, 0, healthyWidth,
                          health > 30 ? rgb(0, 255, 100)
                                      : rgb(255, 30, 20));
   if (healthRegenToWidth > healthRegenFromWidth &&
       now - healthRegenAt < HEALTH_REGEN_FLASH_MS) {
-    display->drawFastHLine(2 + healthRegenFromWidth, 0,
+    display->drawFastHLine(healthRegenFromWidth, 0,
                            healthRegenToWidth - healthRegenFromWidth,
                            rgb(0, 255, 0));
   }
@@ -1338,7 +1346,7 @@ void drawPlaying(uint32_t now) {
     const uint32_t damageAge = now - healthDamageAt;
     const bool flashVisible = damageAge >= 450 || ((damageAge / 75) & 1) == 0;
     if (flashVisible) {
-      display->drawFastHLine(2 + healthyWidth, 0,
+      display->drawFastHLine(healthyWidth, 0,
                              displayedWidth - healthyWidth,
                              damageAge < 450 ? rgb(255, 0, 0)
                                              : rgb(130, 0, 0));
@@ -1348,7 +1356,7 @@ void drawPlaying(uint32_t now) {
   display->setFont(&Picopixel);
   display->setTextSize(1);
   display->setTextColor(rgb(255, 255, 255));
-  display->setCursor(2, 63);
+  display->setCursor(0, 63);
   display->printf("%lu", static_cast<unsigned long>(score));
   display->setFont(nullptr);
 
@@ -1364,12 +1372,13 @@ void drawEnd(bool failed) {
   snprintf(scoreText, sizeof(scoreText), "SCORE %lu",
            static_cast<unsigned long>(score));
   centeredSmallText(scoreText, 18, rgb(255, 255, 255));
-  display->setTextSize(1);
-  display->setTextColor(rgb(255, 255, 255));
-  display->setCursor(4, 28);
-  display->printf("P%u G%u M%u", perfects, goods, misses);
-  display->setCursor(4, 38);
-  display->printf("MAX COMBO %u", maxCombo);
+  char judgmentText[24];
+  snprintf(judgmentText, sizeof(judgmentText), "P%u G%u M%u",
+           perfects, goods, misses);
+  centeredSmallText(judgmentText, 28, rgb(255, 255, 255));
+  char comboText[24];
+  snprintf(comboText, sizeof(comboText), "MAX COMBO %u", maxCombo);
+  centeredSmallText(comboText, 38, rgb(255, 255, 255));
   const uint16_t hits = perfects + goods;
   const uint8_t accuracy = noteCount ? hits * 100 / noteCount : 0;
   const char grade = accuracy >= 95 ? 'S' : accuracy >= 85 ? 'A' :
