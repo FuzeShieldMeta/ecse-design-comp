@@ -1341,16 +1341,21 @@ void drawCinematicEarth(int centerY, int radius, uint8_t rotation) {
         const int edge = radius - distance;
         const uint8_t texture = static_cast<uint8_t>(
             x * 23 + y * 41 + rotation * 17 + dx * dy);
+        const int sunlight = constrain(190 - dx * 8 - dy * 6, 72, 255);
         if (edge <= 1) {
-          display->drawPixelRGB888(x, y, 20, 225, 255);
+          display->drawPixelRGB888(
+              x, y, 8 + sunlight / 16,
+              constrain(128 + sunlight / 2 + (texture & 7), 0, 255),
+              constrain(184 + sunlight / 3, 0, 255));
         } else {
-          const uint8_t red = 2 + ((texture >> 6) & 1) * 4;
-          const uint8_t green = constrain(48 + edge * 4 +
-                                          static_cast<int>(texture & 15),
-                                          0, 132);
-          const uint8_t blue = constrain(176 + edge * 4 +
-                                         static_cast<int>((texture >> 2) & 23),
-                                         0, 255);
+          const int wave = static_cast<int>(texture & 15) - 7;
+          const uint8_t red = constrain(2 + sunlight / 48 + wave / 4,
+                                        0, 18);
+          const uint8_t green = constrain(
+              (42 + edge * 4 + wave) * sunlight / 210, 22, 145);
+          const uint8_t blue = constrain(
+              (164 + edge * 5 + ((texture >> 2) & 15)) * sunlight / 210,
+              92, 255);
           display->drawPixelRGB888(x, y, red, green, blue);
         }
       }
@@ -1373,12 +1378,17 @@ void drawCinematicEarth(int centerY, int radius, uint8_t rotation) {
         const int localY = baseY + py;
         if (localX * localX + localY * localY >
             innerRadius * innerRadius) continue;
-        if (highColor)
-          display->drawPixelRGB888(centerX + localX, centerY + localY,
-                                   color888.red, color888.green,
-                                   color888.blue);
-        else
+        if (highColor) {
+          const int light = constrain(218 - localX * 7 - localY * 5 +
+                                      ((px + py) & 1) * 13, 105, 255);
+          display->drawPixelRGB888(
+              centerX + localX, centerY + localY,
+              color888.red * light / 255,
+              color888.green * light / 255,
+              color888.blue * light / 255);
+        } else {
           display->drawPixel(centerX + localX, centerY + localY, color);
+        }
       }
     }
   };
@@ -2190,24 +2200,39 @@ void drawEarthTargetBeams(int commanderY, uint32_t age) {
 }
 
 void drawEarthVictoryCannon(uint32_t attackAge) {
-  // Earth sits low in the frame so the defence cannon and its deliberately
-  // excessive shot have a longer, clearer vertical silhouette.
-  constexpr int earthCenterY = 65;
-  constexpr int turretShiftY = 13;
-  constexpr int muzzleY = 19 + turretShiftY;
+  // The broad, bright Earth dominates the lower frame while the compact
+  // defence tower keeps its muzzle high enough for the comic long shot.
+  constexpr int earthCenterY = 61;
+  constexpr int earthRadius = 14;
+  constexpr int muzzleY = 33;
   constexpr int beamTargetY = 6;
-  drawCinematicEarth(earthCenterY, 12, attackAge / 60);
-  const uint16_t darkMetal = rgb(20, 35, 105);
-  const uint16_t metal = rgb(80, 120, 210);
-  const uint16_t highlight = rgb(170, 235, 255);
-  display->fillRect(22, 39 + turretShiftY, 19, 6, darkMetal);
-  display->fillRect(24, 37 + turretShiftY, 15, 5, metal);
-  display->drawFastHLine(25, 37 + turretShiftY, 13, highlight);
-  display->fillRect(27, 29 + turretShiftY, 9, 9, darkMetal);
-  display->fillRect(28, 27 + turretShiftY, 7, 10, metal);
-  display->drawFastVLine(29, 28 + turretShiftY, 8, highlight);
-  display->fillRect(29, 20 + turretShiftY, 5, 9, darkMetal);
-  display->fillRect(30, muzzleY, 3, 9, highlight);
+  cinematicCircle(31, earthCenterY, earthRadius + 2, {4, 55, 138});
+  cinematicCircle(31, earthCenterY, earthRadius + 1, {14, 174, 236});
+  drawCinematicEarth(earthCenterY, earthRadius, attackAge / 60);
+
+  // Direct RGB888 metal layers provide cool navy shadows, cobalt armour,
+  // cyan edge lighting, and warm status lamps without RGB565 banding.
+  constexpr CinematicColor deepShadow{9, 20, 65};
+  constexpr CinematicColor shadowMetal{18, 48, 126};
+  constexpr CinematicColor armour{55, 111, 211};
+  constexpr CinematicColor armourLight{105, 174, 245};
+  constexpr CinematicColor edgeLight{184, 239, 255};
+  cinematicFillRect(26, 50, 11, 4, deepShadow);
+  cinematicFillRect(27, 49, 9, 3, shadowMetal);
+  cinematicFillRect(28, 48, 7, 3, armour);
+  cinematicFillRect(29, 48, 5, 1, edgeLight);
+  cinematicFillRect(29, 42, 5, 7, deepShadow);
+  cinematicFillRect(30, 40, 3, 9, armour);
+  cinematicFillRect(30, 41, 1, 7, armourLight);
+  cinematicFillRect(30, 34, 3, 7, shadowMetal);
+  cinematicFillRect(31, muzzleY, 1, 8, edgeLight);
+
+  // Tiny mechanical details remain readable on the 64-pixel display.
+  cinematicPixel(27, 51, {226, 245, 255});
+  cinematicPixel(35, 51, {226, 245, 255});
+  cinematicPixel(29, 49, {255, 190, 24});
+  cinematicPixel(33, 49, {255, 58, 79});
+  cinematicPixel(31, 44, {0, 255, 214});
 
   float fire = constrain(attackAge /
                              static_cast<float>(EARTH_COUNTERATTACK_MS),
@@ -2222,7 +2247,7 @@ void drawEarthVictoryCannon(uint32_t attackAge) {
   const int beamTop = lroundf(muzzleY + (beamTargetY - muzzleY) * fire);
   // A nine-pixel plasma envelope with a five-pixel white/cyan core dwarfs the
   // cannon barrel, crosses the commander's cockpit, and visibly originates at
-  // the lowered muzzle rather than appearing as a detached screen effect.
+  // the muzzle rather than appearing as a detached screen effect.
   const int beamHeight = muzzleY - beamTop + 1;
   cinematicFillRect(27, beamTop, 9, beamHeight, {0, 86, 255});
   cinematicFillRect(29, beamTop, 5, beamHeight, {0, 255, 249});
