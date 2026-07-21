@@ -43,6 +43,7 @@ enum class GimmickType : uint8_t {
   Wind,
   ScreenFlash,
   LanePulse,
+  Commander,
 };
 
 enum class GimmickPattern : uint8_t {

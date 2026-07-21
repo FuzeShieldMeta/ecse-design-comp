@@ -68,6 +68,8 @@ bool parseGimmickType(const String &text, GimmickType &type) {
     type = GimmickType::ScreenFlash;
   else if (text.equalsIgnoreCase("lane_pulse"))
     type = GimmickType::LanePulse;
+  else if (text.equalsIgnoreCase("commander"))
+    type = GimmickType::Commander;
   else return false;
   return true;
 }
@@ -215,10 +217,14 @@ bool parseGimmick(const String &value, ChartGimmick &gimmick) {
       ? (35UL << 16) | (130UL << 8) | 180UL
       : gimmick.type == GimmickType::ScreenFlash
           ? (255UL << 16) | (255UL << 8) | 255UL
-          : (45UL << 16) | (60UL << 8) | 120UL;
-  gimmick.brightness = gimmick.type == GimmickType::Wind ? 1.0f :
-                        gimmick.type == GimmickType::ScreenFlash ? 0.14f :
-                                                                   0.18f;
+          : gimmick.type == GimmickType::Commander
+              ? (60UL << 16) | (255UL << 8) | 35UL
+              : (45UL << 16) | (60UL << 8) | 120UL;
+  gimmick.brightness = gimmick.type == GimmickType::Wind ||
+                               gimmick.type == GimmickType::Commander
+                           ? 1.0f
+                           : gimmick.type == GimmickType::ScreenFlash
+                               ? 0.14f : 0.18f;
   gimmick.rateHz = 0.0f;
   gimmick.speed = 1.0f;
   gimmick.direction = 1;

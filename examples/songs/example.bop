@@ -12,6 +12,7 @@ duration=12000
 mapping=0
 
 # EASY: sparse rhythmic landmarks.
+# Optional encounter cue: gimmick=2,commander,6000,1600,color=60:255:35
 note=2000,twist,left
 note=3000,pull,half
 note=5000,pull,half,1600,full,800,0

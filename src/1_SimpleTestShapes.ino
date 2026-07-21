@@ -53,7 +53,6 @@
 #define SELF_TEST_CAROUSEL_INTERVAL_MS 2000UL
 #define SELF_TEST_FINAL_COVER_HOLD_MS 1000UL
 #define SELF_TEST_DIFFICULTY_INTERVAL_MS 2000UL
-#define SELF_TEST_RESULT_HOLD_MS 2000UL
 #define SELF_TEST_NEXT_COVER_HOLD_MS 1000UL
 #define DEFAULT_RENDER_INTERVAL_US 20000UL
 #define ENABLE_NOTE_SUBPIXEL_BLEND 0
@@ -68,7 +67,9 @@ enum class Screen : uint8_t {
   Select, DifficultySelect, Playing, Paused, Results, Failed
 };
 enum class DisplayProfile : uint8_t { None, Select, Game };
-enum class GimmickType : uint8_t { WindGust, ScreenFlash, LanePulse };
+enum class GimmickType : uint8_t {
+  WindGust, ScreenFlash, LanePulse, CommanderApproach
+};
 enum class PullState : uint8_t { Rest, Half, Full, Fault };
 enum class StartupTestPhase : uint8_t {
   Carousel, FinalCover, DifficultyWait
@@ -107,6 +108,20 @@ constexpr size_t MAX_NOTES = 220;
 constexpr size_t GIMMICK_COUNT = BopImport::MAX_GIMMICKS;
 constexpr int NOTE_HIT_Y = 58;
 constexpr int NOTE_TOP_Y = 0;
+constexpr int COMMANDER_GAME_Y = -20;
+constexpr int COMMANDER_STAGE_Y = 0;
+constexpr uint16_t COMMANDER_APPROACH_MS = 520;
+constexpr uint16_t GAME_INTRO_HOLD_MS = 900;
+constexpr uint16_t GAME_INTRO_RETREAT_MS = 1300;
+constexpr uint16_t GAME_INTRO_READY_MS = 400;
+constexpr uint32_t GAME_INTRO_MS = GAME_INTRO_HOLD_MS +
+                                   GAME_INTRO_RETREAT_MS +
+                                   GAME_INTRO_READY_MS;
+constexpr uint16_t EARTH_TARGET_MS = 650;
+constexpr uint16_t FAILURE_CINEMATIC_MS = 3200;
+constexpr uint16_t EARTH_COUNTERATTACK_MS = 800;
+constexpr uint16_t VICTORY_CINEMATIC_MS = 3000;
+constexpr uint16_t TURRET_FIRE_MS = 170;
 constexpr int GIMMICK_SAFE_ZONE_Y = 26;  // Bottom 60% begins here.
 constexpr int32_t NOTE_TRAVEL_MS = 1800;
 constexpr uint16_t POST_HIT_DISPLAY_MS = 160;
@@ -187,6 +202,7 @@ bool rebuildDisplay(DisplayProfile profile);
 PullState previousPullState = PullState::Rest;
 volatile uint32_t runStartedAt = 0;
 volatile uint32_t runStartedAtUs = 0;
+uint32_t introStartedAt = 0;
 uint32_t pausedAt = 0;
 uint32_t pausedAtUs = 0;
 uint32_t pauseChordAt = 0;
@@ -278,6 +294,10 @@ uint32_t songTime(uint32_t now) {
   return elapsed < 0 ? 0 : static_cast<uint32_t>(elapsed);
 }
 
+bool songClockStarted(uint32_t now) {
+  return static_cast<int32_t>(now - runStartedAt) >= 0;
+}
+
 uint16_t perfectWindow() {
   return 70;
 }
@@ -325,7 +345,9 @@ bool buildImportedChart() {
     const GimmickType type = source.type == BopImport::GimmickType::Wind
         ? GimmickType::WindGust
         : source.type == BopImport::GimmickType::ScreenFlash
-            ? GimmickType::ScreenFlash : GimmickType::LanePulse;
+            ? GimmickType::ScreenFlash
+            : source.type == BopImport::GimmickType::Commander
+                ? GimmickType::CommanderApproach : GimmickType::LanePulse;
     gimmicks[i] = {source.id, source.startMs, source.durationMs, type,
                    source.target, source.color, source.brightness,
                    source.rateHz, source.speed, source.direction,
@@ -418,8 +440,9 @@ void audioTask(void *) {
   bool wavOpenAttempted = false;
 
   for (;;) {
-    const bool active = screen == Screen::Playing;
-    const uint32_t t = active ? songTime(millis()) : 0;
+    const uint32_t now = millis();
+    const bool active = screen == Screen::Playing && songClockStarted(now);
+    const uint32_t t = active ? songTime(now) : 0;
     const uint8_t songIndex = selectedSong;
     const BopImport::Song *song = importedSong(songIndex);
     const uint32_t generation = audioRunGeneration;
@@ -490,8 +513,9 @@ bool startRun(uint32_t now) {
     laneJudgmentShownAt[lane] = 0;
   }
   previousPullState = readPullState();
-  runStartedAt = now;
-  runStartedAtUs = micros();
+  introStartedAt = now;
+  runStartedAt = now + GAME_INTRO_MS;
+  runStartedAtUs = micros() + GAME_INTRO_MS * 1000UL;
   ++audioRunGeneration;
   screen = Screen::Playing;
   return true;
@@ -702,7 +726,8 @@ void updateRepeatingDemo(uint32_t now) {
   if (!startupAutoPlay) return;
 
   if (screen == Screen::Results || screen == Screen::Failed) {
-    if (now - endShownAt < SELF_TEST_RESULT_HOLD_MS) return;
+    const uint32_t resultHold = 4000UL;
+    if (now - endShownAt < resultHold) return;
     if (songCount() == 0) {
       startupAutoPlay = false;
       return;
@@ -898,6 +923,10 @@ void updateInputs(uint32_t now) {
   }
 
   if (screen == Screen::Results || screen == Screen::Failed) {
+    const uint32_t protectedHold = screen == Screen::Failed
+                                       ? FAILURE_CINEMATIC_MS
+                                       : VICTORY_CINEMATIC_MS;
+    if (now - endShownAt < protectedHold) return;
     if (anyAction) {
       screen = Screen::Select;
       carouselChangedAt = now;
@@ -914,6 +943,10 @@ void updateInputs(uint32_t now) {
     return;
   }
   if (screen != Screen::Playing) return;
+
+  // The opening encounter is non-interactive. Ignoring controls here prevents
+  // an early press from becoming a miss before the soundtrack has begun.
+  if (!songClockStarted(now)) return;
 
   if (pushInput.stable && pullFull.stable) {
     if (pauseChordAt == 0) pauseChordAt = now;
@@ -1167,6 +1200,123 @@ int laneX(Lane lane) {
   return lane == Lane::Twist ? 11 : lane == Lane::Push ? 31 : 51;
 }
 
+void drawInvaderShip(int yOffset, uint16_t bodyColor, uint16_t eyeColor,
+                     bool alternatePose, const uint8_t turretFire[3],
+                     int launchY) {
+  // A wide, chunky command invader based on the supplied 64x64 pixel mockup.
+  // The one-pixel stair steps are intentional: this is sprite art drawn with
+  // primitives, so it stays crisp on the physical LED matrix.
+  display->drawLine(18, yOffset + 3, 22, yOffset + 7, bodyColor);
+  display->drawLine(45, yOffset + 3, 41, yOffset + 7, bodyColor);
+  display->fillRect(22, yOffset + 3, 20, 2, bodyColor);
+  display->fillRect(17, yOffset + 5, 30, 2, bodyColor);
+  display->fillRect(12, yOffset + 7, 40, 4, bodyColor);
+  display->fillRect(7, yOffset + 9, 50, 3, bodyColor);
+  display->fillRect(3, yOffset + 11, 58, 2, bodyColor);
+
+  // Contrasting armour bands survive the limited gameplay colour depth and
+  // make the commander read as a detailed arcade sprite instead of one blob.
+  const uint16_t armourHighlight = rgb(190, 255, 35);
+  const uint16_t armourShadow = rgb(0, 105, 115);
+  const uint16_t cockpit = rgb(180, 35, 255);
+  display->drawFastHLine(24, yOffset + 4, 16, armourHighlight);
+  display->drawFastHLine(13, yOffset + 7, 8, armourShadow);
+  display->drawFastHLine(43, yOffset + 7, 8, armourShadow);
+  display->drawFastHLine(8, yOffset + 12, 11, armourShadow);
+  display->drawFastHLine(45, yOffset + 12, 11, armourShadow);
+  display->fillRect(28, yOffset + 6, 8, 2, cockpit);
+  display->drawPixel(31, yOffset + 5, rgb(255, 255, 255));
+  display->drawPixel(32, yOffset + 5, rgb(255, 255, 255));
+
+  // Cockpit eyes and a central grille give the enemy a readable expression.
+  display->fillRect(17, yOffset + 8, 6, 3, eyeColor);
+  display->fillRect(41, yOffset + 8, 6, 3, eyeColor);
+  display->drawFastHLine(29, yOffset + 9, 6, eyeColor);
+
+  // Animated wing tips create the classic two-frame Space Invaders shuffle.
+  if (alternatePose) {
+    display->drawLine(3, yOffset + 10, 0, yOffset + 7, bodyColor);
+    display->drawLine(60, yOffset + 10, 63, yOffset + 7, bodyColor);
+    display->drawFastHLine(7, yOffset + 14, 7, bodyColor);
+    display->drawFastHLine(50, yOffset + 14, 7, bodyColor);
+  } else {
+    display->drawLine(3, yOffset + 12, 0, yOffset + 15, bodyColor);
+    display->drawLine(60, yOffset + 12, 63, yOffset + 15, bodyColor);
+    display->drawFastHLine(4, yOffset + 14, 8, bodyColor);
+    display->drawFastHLine(52, yOffset + 14, 8, bodyColor);
+  }
+
+  const uint16_t turretColors[3] = {
+    rgb(255, 45, 35), rgb(255, 205, 0), rgb(0, 145, 255)
+  };
+  const uint16_t turretHighlights[3] = {
+    rgb(255, 135, 40), rgb(255, 255, 80), rgb(0, 255, 255)
+  };
+  for (uint8_t lane = 0; lane < 3; ++lane) {
+    const int x = laneX(static_cast<Lane>(lane));
+    const bool firing = turretFire != nullptr && turretFire[lane] > 0;
+    const int recoil = firing && turretFire[lane] > 110 ? -1 : 0;
+    display->fillRect(x - 2, yOffset + 12 + recoil, 5, 3,
+                      turretColors[lane]);
+    display->drawFastHLine(x - 1, yOffset + 12 + recoil, 3,
+                           turretHighlights[lane]);
+    display->fillRect(x, yOffset + 15 + recoil, 1, 3,
+                      turretHighlights[lane]);
+    if (!firing) continue;
+
+    const uint16_t flash = turretFire[lane] > 90
+                               ? rgb(255, 255, 255)
+                               : rgb(0, 190, 255);
+    display->drawPixel(x, yOffset + 18, flash);
+    if (turretFire[lane] > 60) {
+      display->drawPixel(x - 1, yOffset + 19, flash);
+      display->drawPixel(x + 1, yOffset + 19, flash);
+    }
+    for (int beamY = max(0, yOffset + 20); beamY < launchY; ++beamY)
+      display->drawPixel(x, beamY, rgb(0, 75, 170));
+  }
+}
+
+void drawCinematicEarth(int centerY, int radius, uint8_t rotation) {
+  // High-contrast RGB565-safe colours keep the planet readable on the panel:
+  // a cyan atmosphere, saturated blue ocean, green land, and white ice/clouds.
+  const uint16_t atmosphere = rgb(0, 220, 255);
+  const uint16_t ocean = rgb(0, 55, 210);
+  const uint16_t oceanLight = rgb(0, 115, 255);
+  const uint16_t land = rgb(35, 220, 70);
+  const uint16_t landLight = rgb(150, 255, 50);
+  const uint16_t cloud = rgb(235, 255, 255);
+  const int centerX = 31;
+  display->fillCircle(centerX, centerY, radius, atmosphere);
+  display->fillCircle(centerX, centerY, max(1, radius - 2), ocean);
+  display->drawCircle(centerX - 2, centerY - 2, max(1, radius - 4),
+                      oceanLight);
+
+  const int diameter = radius * 2 - 5;
+  const int scroll = diameter > 0 ? rotation % diameter : 0;
+  auto drawLandPatch = [&](int baseX, int baseY, int width, int height,
+                           uint16_t color) {
+    const int innerRadius = max(1, radius - 3);
+    for (int py = 0; py < height; ++py) {
+      for (int px = 0; px < width; ++px) {
+        const int localX = (baseX + px + scroll) % diameter - diameter / 2;
+        const int localY = baseY + py;
+        if (localX * localX + localY * localY <=
+            innerRadius * innerRadius)
+          display->drawPixel(centerX + localX, centerY + localY, color);
+      }
+    }
+  };
+  drawLandPatch(2, -radius / 2, 6, 4, land);
+  drawLandPatch(5, -radius / 2 + 3, 5, 5, landLight);
+  drawLandPatch(diameter / 2 + 2, 1, 7, 4, land);
+  drawLandPatch(diameter / 2, 4, 5, 3, landLight);
+  display->drawFastHLine(centerX - radius / 2, centerY - radius + 4,
+                         radius, cloud);
+  display->drawFastHLine(centerX - radius + 5, centerY - 1,
+                         max(2, radius / 2), cloud);
+}
+
 uint16_t noteColor(Lane lane, float brightness) {
   brightness = constrain(brightness, 0.0f, 1.0f);
   uint8_t r = 0;
@@ -1264,7 +1414,7 @@ void twistSegmentGeometry(int centerX, bool turnRight,
   }
 }
 
-void drawNote(const NoteDef &note, int x, float y) {
+void drawNote(const NoteDef &note, int x, float y, int noteTopY) {
 #if ENABLE_NOTE_SUBPIXEL_BLEND
   const int baseY = floorf(y);
   const float fraction = y - baseY;
@@ -1272,7 +1422,7 @@ void drawNote(const NoteDef &note, int x, float y) {
   // of the distance travelled per presented frame, brighten the forward row,
   // and dim the trailing row. Geometry and the fully lit body stay unchanged.
   const float pixelsPerFrame =
-      (NOTE_HIT_Y - NOTE_TOP_Y) * renderIntervalUs /
+      (NOTE_HIT_Y - noteTopY) * renderIntervalUs /
       (NOTE_TRAVEL_MS * 1000000.0f);
   const float forwardPosition = constrain(
       fraction + pixelsPerFrame * 0.35f, 0.0f, 1.0f);
@@ -1333,6 +1483,8 @@ void drawGimmickEffect(uint32_t now, uint32_t t) {
   for (const GimmickDef &gimmick : gimmicks) {
     if (gimmick.durationMs == 0 || t < gimmick.startMs ||
         t >= gimmick.startMs + gimmick.durationMs) continue;
+    // Commander movement is applied when the foreground sprite is drawn.
+    if (gimmick.type == GimmickType::CommanderApproach) continue;
     const uint32_t elapsedMs = t - gimmick.startMs;
     const float progress = static_cast<float>(elapsedMs) / gimmick.durationMs;
     const float envelope = gimmick.rateHz > 0.0f
@@ -1388,7 +1540,52 @@ void drawGimmickEffect(uint32_t now, uint32_t t) {
   }
 }
 
+void drawGameIntro(uint32_t now) {
+  const uint32_t age = now - introStartedAt;
+  display->fillScreen(0);
+
+  // Sparse fixed stars establish scale without producing noisy low-bit-depth
+  // gradients on the HUB75 panels.
+  const uint16_t star = rgb(100, 120, 180);
+  for (uint8_t i = 0; i < 12; ++i)
+    display->drawPixel((i * 17 + 5) % 64, (i * 11 + 3) % 54, star);
+
+  float retreat = 0.0f;
+  if (age > GAME_INTRO_HOLD_MS) {
+    retreat = constrain(
+        (age - GAME_INTRO_HOLD_MS) /
+            static_cast<float>(GAME_INTRO_RETREAT_MS),
+        0.0f, 1.0f);
+    retreat = retreat * retreat * (3.0f - 2.0f * retreat);
+  }
+  const int commanderY = lroundf(COMMANDER_STAGE_Y +
+      (COMMANDER_GAME_Y - COMMANDER_STAGE_Y) * retreat);
+  const int earthY = lroundf(51 + 31 * retreat);
+  const int earthRadius = lroundf(17 - 4 * retreat);
+  const uint8_t noFire[3]{};
+  const int launchY = constrain(commanderY + 20, NOTE_TOP_Y, 20);
+  drawInvaderShip(commanderY, rgb(60, 255, 35), rgb(4, 0, 18),
+                  ((age / 220) & 1) != 0, noFire, launchY);
+  drawCinematicEarth(earthY, earthRadius, age / 70);
+
+  // The final beat of the cinematic presents an empty, ready playfield. Both
+  // actors have cleared the matrix before the song and first notes can begin.
+  if (age >= GAME_INTRO_HOLD_MS + GAME_INTRO_RETREAT_MS) {
+    const uint16_t laneWall = rgb(0, 42, 125);
+    for (int x : {0, 21, 41, 63})
+      display->drawFastVLine(x, NOTE_TOP_Y,
+                             NOTE_HIT_Y - NOTE_TOP_Y + 1, laneWall);
+    for (uint8_t lane = 0; lane < 3; ++lane)
+      display->drawFastHLine(LANE_LEFT_X[lane], NOTE_HIT_Y,
+                             LANE_DRAW_WIDTH[lane], rgb(255, 255, 255));
+  }
+}
+
 void drawPlaying(uint32_t now) {
+  if (!songClockStarted(now)) {
+    drawGameIntro(now);
+    return;
+  }
   const uint32_t t = songTime(now);
   const uint32_t preciseElapsedUs = screen == Screen::Paused
                                         ? pausedAtUs - runStartedAtUs
@@ -1396,9 +1593,55 @@ void drawPlaying(uint32_t now) {
   const float preciseTimeMs = preciseElapsedUs * 0.001f;
   display->fillScreen(0);
   drawGimmickEffect(now, t);
-  // Extend the two internal column separators to the top edge.
-  for (int x : {21, 41})
-    display->drawFastVLine(x, 0, NOTE_HIT_Y + 1, rgb(45, 45, 45));
+
+  uint8_t turretFire[3]{};
+  for (size_t i = 0; i < noteCount; ++i) {
+    const int32_t launchAt = static_cast<int32_t>(chart[i].hitMs) -
+                             NOTE_TRAVEL_MS;
+    const int32_t launchAge = static_cast<int32_t>(preciseTimeMs) - launchAt;
+    if (launchAge < 0 || launchAge >= TURRET_FIRE_MS) continue;
+    const uint8_t lane = min<uint8_t>(chart[i].startColumn, 2);
+    turretFire[lane] = max<uint8_t>(
+        turretFire[lane], TURRET_FIRE_MS - launchAge);
+  }
+
+  const bool invaderStep = ((t / 260) & 1) != 0;
+  int commanderY = COMMANDER_GAME_Y;
+  uint16_t commanderColor = rgb(60, 255, 35);
+  for (const GimmickDef &gimmick : gimmicks) {
+    if (gimmick.type != GimmickType::CommanderApproach ||
+        gimmick.durationMs == 0 || t < gimmick.startMs ||
+        t >= gimmick.startMs + gimmick.durationMs) continue;
+    const uint32_t elapsed = t - gimmick.startMs;
+    const uint32_t edgeDuration = min<uint32_t>(
+        COMMANDER_APPROACH_MS, max<uint32_t>(1, gimmick.durationMs / 2));
+    float stageAmount = 1.0f;
+    if (elapsed < edgeDuration) {
+      stageAmount = elapsed / static_cast<float>(edgeDuration);
+    } else if (gimmick.durationMs - elapsed < edgeDuration) {
+      stageAmount = (gimmick.durationMs - elapsed) /
+                    static_cast<float>(edgeDuration);
+    }
+    stageAmount = stageAmount * stageAmount * (3.0f - 2.0f * stageAmount);
+    commanderY = lroundf(COMMANDER_GAME_Y +
+        (COMMANDER_STAGE_Y - COMMANDER_GAME_Y) * stageAmount);
+    commanderColor = rgb(
+        static_cast<uint8_t>(((gimmick.color >> 16) & 0xFF) *
+                             gimmick.brightness),
+        static_cast<uint8_t>(((gimmick.color >> 8) & 0xFF) *
+                             gimmick.brightness),
+        static_cast<uint8_t>((gimmick.color & 0xFF) * gimmick.brightness));
+  }
+  const int noteTopY = constrain(commanderY + 20, NOTE_TOP_Y, 20);
+  drawInvaderShip(commanderY, commanderColor, rgb(4, 0, 18),
+                  invaderStep, turretFire, noteTopY);
+
+  // Neon-blue lane walls begin under the cannons, visually connecting each
+  // projectile source to its matching player control.
+  const uint16_t laneWall = rgb(0, 42, 125);
+  for (int x : {0, 21, 41, 63})
+    display->drawFastVLine(x, noteTopY, NOTE_HIT_Y - noteTopY + 1,
+                           laneWall);
 
   // Draw the lane-specific timing segments before notes so approaching notes
   // remain visible as they cross the line. These colours deliberately avoid
@@ -1425,15 +1668,15 @@ void drawPlaying(uint32_t now) {
     const float visibleAfterHit = chart[i].holdMs + POST_HIT_DISPLAY_MS;
     if (until < -visibleAfterHit || until > NOTE_TRAVEL_MS) continue;
     const float y = NOTE_HIT_Y -
-        until * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) / NOTE_TRAVEL_MS;
+        until * static_cast<float>(NOTE_HIT_Y - noteTopY) / NOTE_TRAVEL_MS;
     float tailY = y;
     if (chart[i].holdMs > 0) {
       const float tailUntil = chart[i].hitMs + chart[i].holdMs - preciseTimeMs;
       tailY = NOTE_HIT_Y -
-          tailUntil * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) /
+          tailUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
           NOTE_TRAVEL_MS;
-      if (y < NOTE_TOP_Y || tailY > 63) continue;
-    } else if (y < NOTE_TOP_Y || y > 63) {
+      if (y < noteTopY || tailY > 63) continue;
+    } else if (y < noteTopY || y > 63) {
       continue;
     }
     const int startX = laneX(static_cast<Lane>(chart[i].startColumn));
@@ -1452,7 +1695,7 @@ void drawPlaying(uint32_t now) {
     }
 
     if (chart[i].holdMs > 0) {
-      const int railTop = max(NOTE_TOP_Y, static_cast<int>(lroundf(tailY)));
+      const int railTop = max(noteTopY, static_cast<int>(lroundf(tailY)));
       const int railBottom = min(63, static_cast<int>(lroundf(y)));
       if (railBottom >= railTop) {
         const int trailHeight = railBottom - railTop + 1;
@@ -1469,7 +1712,7 @@ void drawPlaying(uint32_t now) {
             const float transitionUntil =
                 chart[i].hitMs + chart[i].pullTransitionMs - preciseTimeMs;
             const float transitionY = NOTE_HIT_Y -
-                transitionUntil * static_cast<float>(NOTE_HIT_Y - NOTE_TOP_Y) /
+                transitionUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
                     NOTE_TRAVEL_MS;
             const int transitionRow = static_cast<int>(lroundf(transitionY));
             drawPullTrail(x, railTop, min(railBottom, transitionRow),
@@ -1486,11 +1729,11 @@ void drawPlaying(uint32_t now) {
         }
       }
     }
-    if (y <= 63) drawNote(chart[i], x, y);
+    if (y <= 63) drawNote(chart[i], x, y, noteTopY);
   }
 
-  // Mask row zero after all playfield rendering, then draw health as the
-  // foreground UI. Notes and hold trails can never cover or replace it.
+  // Keep health on the top row as foreground UI. Notes, commander movement,
+  // and gimmick effects cannot cover or replace the meter.
   display->drawFastHLine(0, 0, 64, 0);
   const uint32_t healthFrameMs = now - healthAnimationAt;
   healthAnimationAt = now;
@@ -1536,27 +1779,262 @@ void drawPlaying(uint32_t now) {
     centeredText("PULL FAULT", 17, rgb(255, 20, 20));
 }
 
-void drawEnd(bool failed) {
+void drawEarthExplosion(uint32_t age) {
+  constexpr int centerX = 31;
+  constexpr int centerY = 49;
+  const uint16_t deepRed = rgb(145, 0, 20);
+  const uint16_t hotRed = rgb(255, 35, 0);
+  const uint16_t orange = rgb(255, 120, 0);
+  const uint16_t yellow = rgb(255, 245, 20);
+  const uint16_t whiteHot = rgb(255, 255, 255);
+  const int radius = min<uint32_t>(36, 3 + age / 43);
+  const int pulse = ((age / 70) & 1) ? 1 : 0;
+
+  // Multiple offset fireballs create an irregular blast substantially larger
+  // than the planet it replaces—the intended arcade-comedy exaggeration.
+  display->fillCircle(centerX, centerY, radius, deepRed);
+  constexpr int8_t lobeX[8] = {-4, -3, 0, 3, 4, 3, 0, -3};
+  constexpr int8_t lobeY[8] = {0, -3, -4, -3, 0, 3, 4, 3};
+  const int lobeDistance = max(2, radius * 3 / 4);
+  const int lobeRadius = max(2, radius / 3 + pulse);
+  for (uint8_t lobe = 0; lobe < 8; ++lobe) {
+    display->fillCircle(centerX + lobeX[lobe] * lobeDistance / 4,
+                        centerY + lobeY[lobe] * lobeDistance / 4,
+                        lobeRadius, lobe & 1 ? hotRed : orange);
+  }
+  display->fillCircle(centerX, centerY, max(2, radius * 2 / 3), orange);
+  display->fillCircle(centerX - pulse, centerY + pulse,
+                      max(1, radius / 2), yellow);
+  display->fillCircle(centerX + pulse, centerY - pulse,
+                      max(1, radius / 4), whiteHot);
+
+  // Recognisable ocean, atmosphere, and land fragments keep the joke legible:
+  // this is Earth coming apart, not merely a generic fireball.
+  constexpr int8_t velocityX[12] = {
+    -4, -3, -2, -1, 1, 2, 3, 4, -3, 3, -2, 2
+  };
+  constexpr int8_t velocityY[12] = {
+    -3, -1, 2, 4, 4, 2, -1, -3, -4, -4, 3, 3
+  };
+  const uint16_t fragmentColors[4] = {
+    rgb(0, 180, 255), rgb(0, 55, 210),
+    rgb(35, 220, 70), rgb(150, 255, 50)
+  };
+  const int travel = 4 + age / 45;
+  for (uint8_t piece = 0; piece < 12; ++piece) {
+    const int x = centerX + velocityX[piece] * travel / 3;
+    const int y = centerY + velocityY[piece] * travel / 3;
+    if (x >= 0 && x < 63 && y >= 0 && y < 63)
+      display->fillRect(x, y, 2, 2, fragmentColors[piece % 4]);
+  }
+
+  for (uint8_t spark = 0; spark < 10; ++spark) {
+    const int x = (centerX + spark * 19 + age / 17) % 64;
+    const int y = (centerY + spark * 13 + age / 29) % 64;
+    display->drawPixel(x, y, spark & 1 ? yellow : whiteHot);
+  }
+}
+
+void drawEarthTargetBeams(int commanderY, uint32_t age) {
+  float progress = constrain(age / static_cast<float>(EARTH_TARGET_MS),
+                             0.0f, 1.0f);
+  progress = progress * progress * (3.0f - 2.0f * progress);
+  constexpr int impactX[3] = {23, 31, 39};
+  const uint16_t outerColors[3] = {
+    rgb(255, 30, 25), rgb(255, 190, 0), rgb(0, 135, 255)
+  };
+  const uint16_t coreColors[3] = {
+    rgb(255, 150, 80), rgb(255, 255, 120), rgb(100, 255, 255)
+  };
+  for (uint8_t lane = 0; lane < 3; ++lane) {
+    const int startX = laneX(static_cast<Lane>(lane));
+    const int startY = max(0, commanderY + 20);
+    const int endX = lroundf(startX + (impactX[lane] - startX) * progress);
+    const int endY = lroundf(startY + (42 - startY) * progress);
+    // Five-pixel coloured envelope plus a white-hot core is deliberately
+    // excessive, while the converging geometry still reads as turret fire.
+    for (int thickness = -2; thickness <= 2; ++thickness)
+      display->drawLine(startX + thickness, startY,
+                        endX + thickness / 2, endY, outerColors[lane]);
+    display->drawLine(startX, startY, endX, endY, coreColors[lane]);
+    display->fillCircle(endX, endY, progress > 0.8f ? 3 : 1,
+                        coreColors[lane]);
+    if (progress > 0.88f)
+      display->drawCircle(impactX[lane], 42, 4 + ((age / 55) & 1),
+                          rgb(255, 255, 255));
+  }
+}
+
+void drawEarthVictoryCannon(uint32_t attackAge) {
+  // Earth returns with a turret intentionally far too large for the planet.
+  drawCinematicEarth(52, 12, attackAge / 60);
+  const uint16_t darkMetal = rgb(20, 35, 105);
+  const uint16_t metal = rgb(80, 120, 210);
+  const uint16_t highlight = rgb(170, 235, 255);
+  const uint16_t chargeColor = ((attackAge / 70) & 1)
+                                   ? rgb(255, 255, 255)
+                                   : rgb(0, 255, 255);
+  display->fillRect(22, 39, 19, 6, darkMetal);
+  display->fillRect(24, 37, 15, 5, metal);
+  display->drawFastHLine(25, 37, 13, highlight);
+  display->fillRect(27, 29, 9, 9, darkMetal);
+  display->fillRect(28, 27, 7, 10, metal);
+  display->drawFastVLine(29, 28, 8, highlight);
+  display->fillRect(29, 20, 5, 9, darkMetal);
+  display->fillRect(30, 19, 3, 9, highlight);
+
+  float fire = constrain(attackAge /
+                             static_cast<float>(EARTH_COUNTERATTACK_MS),
+                         0.0f, 1.0f);
+  fire = fire * fire * (3.0f - 2.0f * fire);
+  display->fillCircle(31, 19, 2 + ((attackAge / 80) & 1), chargeColor);
+  if (fire <= 0.02f) return;
+
+  const int beamTop = lroundf(19 + (8 - 19) * fire);
+  // A nine-pixel plasma envelope with a five-pixel white/cyan core dwarfs the
+  // cannon barrel but still follows a sensible straight shot into the cockpit.
+  display->fillRect(27, beamTop, 9, 20 - beamTop, rgb(0, 90, 255));
+  display->fillRect(29, beamTop, 5, 20 - beamTop, rgb(0, 255, 255));
+  display->fillRect(30, beamTop, 3, 20 - beamTop, rgb(255, 255, 255));
+  display->fillCircle(31, beamTop, fire > 0.85f ? 5 : 3, chargeColor);
+  if (fire > 0.88f)
+    display->drawCircle(31, 11, 6 + ((attackAge / 45) & 1),
+                        rgb(255, 255, 255));
+}
+
+void drawInvaderExplosion(uint32_t age) {
+  constexpr int centerX = 31;
+  constexpr int centerY = 12;
+  const uint16_t alienGreen = rgb(70, 255, 35);
+  const uint16_t toxicLime = rgb(210, 255, 20);
+  const uint16_t plasmaCyan = rgb(0, 230, 255);
+  const uint16_t plasmaPurple = rgb(210, 30, 255);
+  const uint16_t whiteHot = rgb(255, 255, 255);
+  const int radius = min<uint32_t>(34, 4 + age / 38);
+  const int pulse = ((age / 55) & 1) ? 2 : 0;
+
+  // Expanding toxic plasma rings and asymmetric lobes make the commander's
+  // destruction intentionally much larger than its original sprite.
+  display->fillCircle(centerX, centerY, radius, plasmaPurple);
+  constexpr int8_t lobeX[10] = {-5, -4, -2, 1, 4, 5, 3, 0, -3, -5};
+  constexpr int8_t lobeY[10] = {-1, -4, -5, -5, -3, 1, 4, 5, 4, 2};
+  const int reach = max(3, radius * 4 / 5);
+  for (uint8_t lobe = 0; lobe < 10; ++lobe) {
+    const uint16_t color = lobe % 3 == 0 ? alienGreen :
+                           lobe % 3 == 1 ? plasmaCyan : toxicLime;
+    display->fillCircle(centerX + lobeX[lobe] * reach / 5,
+                        centerY + lobeY[lobe] * reach / 5,
+                        max(2, radius / 3 + (lobe & 1)), color);
+  }
+  display->drawCircle(centerX, centerY, max(2, radius - pulse), whiteHot);
+  display->fillCircle(centerX, centerY, max(2, radius / 2), toxicLime);
+  display->fillCircle(centerX, centerY, max(1, radius / 4), whiteHot);
+
+  // Armour and all three coloured turrets remain identifiable as oversized
+  // chunks sailing away from the blast.
+  const uint16_t chunkColors[7] = {
+    alienGreen, rgb(0, 105, 115), plasmaPurple,
+    rgb(255, 45, 35), rgb(255, 205, 0), rgb(0, 145, 255), whiteHot
+  };
+  constexpr int8_t velocityX[14] = {
+    -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, -4, 4, -2, 2
+  };
+  constexpr int8_t velocityY[14] = {
+    -2, 1, 3, 5, -4, -4, 5, 3, 1, -2, -5, -5, 4, 4
+  };
+  const int travel = 3 + age / 42;
+  for (uint8_t piece = 0; piece < 14; ++piece) {
+    const int x = centerX + velocityX[piece] * travel / 3;
+    const int y = centerY + velocityY[piece] * travel / 3;
+    if (x >= 0 && x < 62 && y >= 0 && y < 62)
+      display->fillRect(x, y, piece % 3 == 0 ? 3 : 2, 2,
+                        chunkColors[piece % 7]);
+  }
+
+  for (uint8_t spark = 0; spark < 18; ++spark) {
+    const int x = (centerX + spark * 23 + age / 13) % 64;
+    const int y = (centerY + spark * 17 + age / 19) % 64;
+    display->drawPixel(x, y, spark & 1 ? plasmaCyan : toxicLime);
+  }
+}
+
+void drawEnd(bool failed, uint32_t now) {
   display->fillScreen(0);
-  centeredText(failed ? "GAME OVER" : "RESULT", 5,
-               failed ? rgb(255, 30, 30) : rgb(0, 255, 255));
+  const uint32_t age = now - endShownAt;
+  const uint32_t approachAge = min<uint32_t>(age, COMMANDER_APPROACH_MS);
+  float entrance = approachAge / static_cast<float>(COMMANDER_APPROACH_MS);
+  entrance = entrance * entrance * (3.0f - 2.0f * entrance);
+  const int entranceY = lroundf(COMMANDER_GAME_Y +
+      (COMMANDER_STAGE_Y - COMMANDER_GAME_Y) * entrance);
+  const uint32_t stagedAge = age > COMMANDER_APPROACH_MS
+                                 ? age - COMMANDER_APPROACH_MS : 0;
+  const uint8_t noFire[3]{};
+  if (failed && age < FAILURE_CINEMATIC_MS) {
+    // The victorious commander targets a returning Earth, then the planet is
+    // replaced by a deliberately ridiculous screen-filling explosion.
+    const int descent = min<uint32_t>(stagedAge / 650, 3);
+    uint8_t volley[3]{};
+    if (age >= COMMANDER_APPROACH_MS) {
+      volley[0] = volley[1] = volley[2] = 150;
+    }
+    const uint16_t enemyColor = ((stagedAge / 100) & 1)
+                                    ? rgb(255, 55, 20)
+                                    : rgb(80, 255, 25);
+    drawInvaderShip(entranceY + descent, enemyColor, rgb(0, 0, 0),
+                    ((stagedAge / 120) & 1) != 0, volley, 20);
+    if (stagedAge < EARTH_TARGET_MS) {
+      drawCinematicEarth(51, 12, stagedAge / 65);
+      drawEarthTargetBeams(entranceY + descent, stagedAge);
+      centeredSmallText("EARTH: UH OH", 27, rgb(255, 255, 255));
+    } else {
+      drawEarthExplosion(stagedAge - EARTH_TARGET_MS);
+    }
+    return;
+  }
+
+  if (failed) {
+    drawInvaderShip(-8, rgb(80, 255, 25), rgb(0, 0, 0),
+                    ((age / 180) & 1) != 0, noFire, 20);
+  } else if (age < VICTORY_CINEMATIC_MS) {
+    const uint32_t explosionAt = COMMANDER_APPROACH_MS +
+                                 EARTH_COUNTERATTACK_MS;
+    const uint32_t attackAge = age > COMMANDER_APPROACH_MS
+                                   ? age - COMMANDER_APPROACH_MS : 0;
+    if (age >= explosionAt) {
+      drawEarthVictoryCannon(EARTH_COUNTERATTACK_MS);
+      drawInvaderExplosion(age - explosionAt);
+      return;
+    }
+    // Earth raises its oversized defence cannon while the commander moves on
+    // stage; the invader strobes only when the beam reaches its cockpit.
+    const bool takingHit = attackAge > EARTH_COUNTERATTACK_MS * 3 / 4;
+    const uint16_t hitColor = takingHit && ((age / 55) & 1)
+                                  ? rgb(255, 255, 255) : rgb(70, 255, 35);
+    drawInvaderShip(entranceY, hitColor, rgb(255, 30, 30),
+                    true, noFire, 20);
+    drawEarthVictoryCannon(attackAge);
+    return;
+  }
+
+  centeredSmallText(failed ? "INVADER WINS" : "ALIEN DEFEATED", 22,
+                    failed ? rgb(255, 50, 25) : rgb(0, 255, 255));
   char scoreText[24];
   snprintf(scoreText, sizeof(scoreText), "SCORE %lu",
            static_cast<unsigned long>(score));
-  centeredSmallText(scoreText, 18, rgb(255, 255, 255));
+  centeredSmallText(scoreText, 29, rgb(255, 255, 255));
   char judgmentText[24];
   snprintf(judgmentText, sizeof(judgmentText), "P%u G%u M%u",
            perfects, goods, misses);
-  centeredSmallText(judgmentText, 28, rgb(255, 255, 255));
+  centeredSmallText(judgmentText, 37, rgb(255, 255, 255));
   char comboText[24];
   snprintf(comboText, sizeof(comboText), "MAX COMBO %u", maxCombo);
-  centeredSmallText(comboText, 38, rgb(255, 255, 255));
+  centeredSmallText(comboText, 45, rgb(255, 255, 255));
   const uint16_t hits = perfects + goods;
   const uint8_t accuracy = noteCount ? hits * 100 / noteCount : 0;
   const char grade = accuracy >= 95 ? 'S' : accuracy >= 85 ? 'A' :
                      accuracy >= 70 ? 'B' : accuracy >= 55 ? 'C' : 'D';
   display->setTextSize(2);
-  display->setCursor(26, 48);
+  display->setCursor(26, 51);
   display->setTextColor(rgb(255, 190, 0));
   display->print(grade);
 }
@@ -1574,7 +2052,7 @@ void render(uint32_t now) {
     centeredText("PAUSED", 25, rgb(255, 60, 200));
     centeredText("PUSH", 34, rgb(255, 255, 255));
   } else {
-    drawEnd(screen == Screen::Failed);
+    drawEnd(screen == Screen::Failed, now);
   }
 }
 
@@ -1743,7 +2221,7 @@ void loop() {
     screen = Screen::Select;
     carouselChangedAt = now;
   }
-  if (screen == Screen::Playing) {
+  if (screen == Screen::Playing && songClockStarted(now)) {
     const uint32_t t = songTime(now);
     updateStartupAutoPlay(t);
     updateHolds(t);

@@ -122,6 +122,13 @@ half-pull position. Long pull notes can change between these appearances along
 their trail. Move from half to full, or full to half, when that boundary reaches
 the timing line. The normal hit tolerance is applied around the transition.
 
+### Start-of-song cinematic
+
+During gameplay the commander remains beyond the upper edge unless a
+`commander` gimmick stages it again. Lane-column tops and note launch rows are
+derived from the moving turret position each frame, so they follow every
+commander entrance and withdrawal.
+
 ## PCM5102A, amplifier, and speaker
 
 Wire the digital side of the PCM5102A as follows:
@@ -336,6 +343,7 @@ Parameters not supplied use type-specific defaults:
 | `wind` | `35:130:180` | `1.0` | `stripes` | right, speed `1.0`, density `4` |
 | `screen_flash` | `255:255:255` | `0.14` | `stripes` | target `all`, rate `0` |
 | `lane_pulse` | `45:60:120` | `0.18` | `solid` | target `all`, rate `0` |
+| `commander` | `60:255:35` | `1.0` | `stripes` | target `all`, rate `0` |
 
 The current renderer supports:
 
@@ -344,13 +352,20 @@ The current renderer supports:
 | `wind` | Animated gust streaks with configurable colour, direction, speed, and density |
 | `screen_flash` | A configurable colour/pattern pulse across the entire screen or selected lane |
 | `lane_pulse` | A configurable full-height pulse behind one lane or all three lanes |
+| `commander` | Brings the alien commander fully down from above the screen, holds it for the gimmick, then withdraws it |
 
 Examples with additional parameters:
 
 ```text
 gimmick=2,screen_flash,16000,1200,target=all,color=255:208:96,brightness=0.30,rate=4.0,pattern=checker
 gimmick=3,lane_pulse,22000,2400,target=pull,color=150:60:255,brightness=0.24,rate=2.0,pattern=solid
+gimmick=4,commander,28000,3200,color=80:255:35,brightness=1.0
 ```
+
+The `commander` entrance and exit each take up to 520 ms. During ordinary
+gameplay the commander looms partially beyond the top edge; this gimmick moves
+the full sprite and its three turrets onto the matrix. `color` and `brightness`
+control its staged appearance.
 
 Both effects are visual-only and are rendered behind notes, timing bars,
 separators, and the health bar. They may cover the full matrix because they do
