@@ -122,6 +122,12 @@ half-pull position. Long pull notes can change between these appearances along
 their trail. Move from half to full, or full to half, when that boundary reaches
 the timing line. The normal hit tolerance is applied around the transition.
 
+Long twist notes can likewise change direction. Their wide green required-side
+segment swaps from left to right, or right to left, at the boundary in the
+trail. Let the spring control pass through centre and engage the new direction
+within the normal timing window. The neutral travel needed to reverse the
+physical switch is accepted around that boundary.
+
 ### Start-of-song cinematic
 
 During gameplay the commander remains beyond the upper edge unless a
@@ -289,8 +295,8 @@ lines requires updating references in that mapping.
 | Push `action` | `tap` |
 | Pull `action` | `half` or `full` |
 | `hold_ms` | `0` for a normal note; otherwise the hold duration |
-| `end_action` | `same`, `half`, or `full`; pull holds only |
-| `transition_ms` | Offset from the start of a pull hold where its state changes |
+| `end_action` | `same`; twist `left`/`right`; or pull `half`/`full` |
+| `transition_ms` | Offset from the start of a twist or pull hold where its state changes |
 | `bonus` | `0` or `1` |
 
 Examples:
@@ -298,8 +304,10 @@ Examples:
 ```text
 note=2000,twist,left
 note=3000,pull,half
-note=5000,pull,half,1600,full,800,0
-note=8000,pull,full,1600,half,800,1
+note=4000,twist,left,1600,right,800,0
+note=6000,twist,right,1600,left,800,0
+note=8000,pull,half,1600,full,800,0
+note=10000,pull,full,1600,half,800,1
 ```
 
 The logical `lane` determines both the physical control and default display

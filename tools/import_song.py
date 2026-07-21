@@ -240,11 +240,12 @@ def contextual_notes(features: dict[str, np.ndarray], duration: float,
                        for step in (0.5, 1.0, 1.5)]
         if note["rms"] > rms_median and np.mean(future_flux) < strong_threshold:
             note["hold"] = round(period * 2 * 1000)
-            if note["lane"] == 2:
-                note["variant"] = pull_transition
-                note["end_variant"] = not pull_transition
+            if note["lane"] in (0, 2):
+                if note["lane"] == 2:
+                    note["variant"] = pull_transition
+                    pull_transition = not pull_transition
+                note["end_variant"] = not note["variant"]
                 note["transition"] = note["hold"] // 2
-                pull_transition = not pull_transition
             last_hold = time_seconds
 
     return declutter_notes(notes, difficulty)

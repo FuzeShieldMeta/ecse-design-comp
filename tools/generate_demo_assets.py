@@ -26,18 +26,25 @@ SONGS = (
         "bars": 8, "color": "00EAFF",
         "melody": (72, -1, 72, 76, 67, -1, 67, 79, 72, -1, 76, 79, 67, 72, 79, -1),
         "bass": (48, -1, -1, -1, 48, -1, -1, -1, 53, -1, -1, -1, 55, -1, -1, -1),
+        # The final high note resolves into a rest: a natural place to sweep
+        # the twist control through centre and reverse it.
+        "twist_hold_steps": (14,),
     },
     {
         "slug": "sync-step", "title": "SYNC STEP", "bpm": 120,
         "bars": 10, "color": "FF28BA",
         "melody": (72, 76, 79, 76, 67, 72, 76, 79, 72, 79, 81, 79, 76, 72, 67, -1),
         "bass": (48, -1, 48, -1, 53, -1, 53, -1, 55, -1, 55, -1, 53, -1, 50, -1),
+        # Hold the melodic apex while the line begins its descent.
+        "twist_hold_steps": (10,),
     },
     {
         "slug": "pull-rush", "title": "PULL RUSH", "bpm": 144,
         "bars": 12, "color": "FFB000",
         "melody": (72, 79, 76, 84, 79, 76, 72, 67, 72, 76, 79, 84, 81, 79, 76, 72),
         "bass": (48, -1, 48, 48, 53, -1, 53, 53, 55, -1, 55, 55, 58, 55, 53, 50),
+        # Reverse on the held high note at the end of the fast response phrase.
+        "twist_hold_steps": (13,),
     },
 )
 
@@ -156,7 +163,7 @@ def build_notes(song_index: int, song: dict,
     step_ms = 60_000 // song["bpm"] // 4
     total_steps = song["bars"] * 16
     notes: list[dict] = []
-    twist_count = pull_count = transition_count = 0
+    pull_count = transition_count = 0
 
     for step in range(total_steps):
         pattern_step = step % 16
@@ -179,20 +186,41 @@ def build_notes(song_index: int, song: dict,
             lane = 1
         long_hold = False
         if lane == 0:
-            twist_count += 1
-            long_hold = twist_count % 6 == 4
+            phrase_number = step // 16
+            long_hold = (
+                pattern_step in song["twist_hold_steps"] and
+                phrase_number % 2 == 1 and
+                step + 8 < total_steps
+            )
         elif lane == 2:
             pull_count += 1
             long_hold = pull_count % 6 == 4
-        hold_ms = step_ms * 3 if long_hold else 0
+            # Do not let an earlier pull sustain consume an authored melodic
+            # reversal later in the same two-beat window.
+            if long_hold:
+                long_hold = not any(
+                    (step + offset) % 16 in song["twist_hold_steps"] and
+                    ((step + offset) // 16) % 2 == 1 and
+                    step + offset + 8 < total_steps
+                    for offset in range(1, 9)
+                )
+        # Twist reversals span two beats so both directions read as part of a
+        # sustained high-register phrase. Pull holds retain their shorter,
+        # punchier three-subdivision gesture.
+        hold_ms = (step_ms * 8 if lane == 0 else step_ms * 3) if long_hold else 0
         variant = bool((step + song_index) & 1)
         end_variant = variant
         transition_ms = 0
-        if lane == 2 and long_hold:
-            variant = bool(transition_count & 1)
+        if long_hold and lane in (0, 2):
+            if lane == 0:
+                # Alternate which way the gesture begins on each selected
+                # phrase, exercising both left-to-right and right-to-left.
+                variant = bool((step // 32 + song_index) & 1)
+            else:
+                variant = bool(transition_count & 1)
+                transition_count += 1
             end_variant = not variant
             transition_ms = hold_ms // 2
-            transition_count += 1
         notes.append({
             "hit": 2000 + step * step_ms, "lane": lane,
             "variant": variant, "bonus": step >= total_steps * 3 // 4,
@@ -222,24 +250,24 @@ def build_notes(song_index: int, song: dict,
         control_held_until[note["lane"]] = note["hit"] + note["hold"]
     notes = filtered
 
-    if difficulty == 2:
-        # HARD may follow the sixteenth-note analysis grid, but the physical
-        # spring controls and five-row note sprites still require separation.
-        # Keep the first musical cue in each too-dense group and give a hold
-        # exclusive ownership of the action stream until it is released.
-        playable: list[dict] = []
-        previous_hit = -HARD_MIN_NOTE_GAP_MS
-        hold_blocked_until = 0
-        for note in notes:
-            if (note["hit"] - previous_hit < HARD_MIN_NOTE_GAP_MS or
-                    note["hit"] < hold_blocked_until):
-                continue
-            playable.append(note)
-            previous_hit = note["hit"]
-            if note["hold"]:
-                hold_blocked_until = (note["hit"] + note["hold"] +
-                                      HARD_MIN_NOTE_GAP_MS)
-        notes = playable
+    # Give every hold exclusive ownership of the action stream. HARD also
+    # follows the sixteenth-note analysis grid, so its ordinary taps retain the
+    # minimum separation required by the controls and five-row sprites.
+    playable: list[dict] = []
+    previous_hit = -HARD_MIN_NOTE_GAP_MS
+    hold_blocked_until = 0
+    for note in notes:
+        if note["hit"] < hold_blocked_until:
+            continue
+        if (difficulty == 2 and
+                note["hit"] - previous_hit < HARD_MIN_NOTE_GAP_MS):
+            continue
+        playable.append(note)
+        previous_hit = note["hit"]
+        if note["hold"]:
+            recovery = HARD_MIN_NOTE_GAP_MS if difficulty == 2 else 0
+            hold_blocked_until = note["hit"] + note["hold"] + recovery
+    notes = playable
 
     duration = 2000 + total_steps * step_ms
     gusts = ((duration // 3, 2800), (duration * 2 // 3, 2800))

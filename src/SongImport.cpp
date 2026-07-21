@@ -192,7 +192,9 @@ bool parseNote(const String &value, uint16_t generatedId, ChartNote &note) {
                           ? constrain(field[5].toInt(), 0, note.holdMs) : 0;
   note.bonus = count > 6 && field[6].toInt() != 0;
 
-  if (note.lane != 2) {
+  // Push holds have no alternate state. Twist and pull holds may both change
+  // to their opposite action at transitionMs.
+  if (note.lane == 1) {
     note.endVariant = note.variant;
     note.transitionMs = 0;
   }

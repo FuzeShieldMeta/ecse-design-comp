@@ -33,7 +33,7 @@ note=3500,pull,full
 
 gimmick=1,screen_flash,4000,900,target=all,color=255:208:96,brightness=0.28,rate=4.0,pattern=checker
 
-note=4500,twist,right,1000,same,0,0
+note=4500,twist,right,1000,left,500,0
 note=6000,pull,half,1600,full,800,0
 
 gimmick=2,lane_pulse,7000,1800,target=pull,color=64:96:255,brightness=0.20,rate=2.0,pattern=solid
@@ -58,7 +58,7 @@ note=3500,pull,full
 gimmick=1,screen_flash,4000,900,target=all,color=255:208:96,brightness=0.28,rate=4.0,pattern=checker
 
 note=4250,push,tap
-note=4500,twist,right,1000,same,0,0
+note=4500,twist,right,1000,left,500,0
 note=6000,pull,half,1600,full,800,0
 
 gimmick=2,lane_pulse,7000,1800,target=pull,color=64:96:255,brightness=0.20,rate=2.0,pattern=solid

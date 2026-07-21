@@ -29,7 +29,7 @@ gimmick=1,wind,7322,2800,target=all,color=35:130:180,brightness=1.0,direction=ri
 
 note=7408,pull,half
 note=7824,pull,half
-note=8240,pull,half,312,full,156,0
+note=8240,pull,half
 
 gimmick_note=1,17,column,1,0,341
 note=8656,pull,half
@@ -46,7 +46,7 @@ note=9904,pull,half
 gimmick_note=1,21,column,1,1198,2005
 note=10320,pull,half
 
-note=10736,pull,full,312,half,156,0
+note=10736,pull,half,312,full,156,0
 
 gimmick=2,screen_flash,10984,900,target=all,color=255:208:96,brightness=0.24,rate=4.0,pattern=checker
 
@@ -59,7 +59,7 @@ note=11568,pull,half
 note=11984,pull,half
 note=12400,pull,half
 note=12816,pull,half
-note=13232,pull,half,312,full,156,0
+note=13232,pull,full,312,half,156,0
 note=13648,pull,half
 note=14064,pull,half
 note=14480,pull,half
@@ -68,7 +68,7 @@ gimmick=3,wind,14645,2800,target=all,color=35:130:180,brightness=1.0,direction=r
 
 note=14896,pull,half
 note=15312,pull,half
-note=15728,pull,full,312,half,156,0
+note=15728,pull,half,312,full,156,0
 
 gimmick_note=3,35,column,1,0,506
 note=16144,pull,half
@@ -85,7 +85,8 @@ note=17392,pull,half,0,same,0,1
 gimmick_note=3,39,column,1,1363,2170
 note=17808,pull,half,0,same,0,1
 
-note=18224,pull,half,312,full,156,1
+gimmick_note=3,40,column,1,1779,2586
+note=18224,pull,half,0,same,0,1
 
 gimmick=4,lane_pulse,18306,2200,target=pull,color=64:96:255,brightness=0.18,rate=2.0,pattern=solid
 
@@ -129,49 +130,54 @@ note=7200,pull,half
 gimmick=1,wind,7322,2800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
 
 note=7408,pull,half
-note=7616,pull,half,312,full,156,0
+note=7616,pull,half
+note=7824,pull,half
 note=8032,pull,half
 note=8240,pull,half
 
-gimmick_note=1,27,column,1,0,133
+gimmick_note=1,28,column,1,0,133
 note=8448,pull,half
 
-gimmick_note=1,28,column,0,0,341
+gimmick_note=1,29,column,0,0,341
 note=8656,pull,half
 
-note=8864,pull,full,312,half,156,0
+note=8864,pull,half,312,full,156,0
 
-gimmick_note=1,30,column,1,158,965
+gimmick_note=1,31,column,1,158,965
 note=9280,pull,half
 
-gimmick_note=1,31,column,0,366,1173
+gimmick_note=1,32,column,0,366,1173
 note=9488,pull,half
 
-gimmick_note=1,32,column,1,574,1381
+gimmick_note=1,33,column,1,574,1381
 note=9696,pull,half
 
-gimmick_note=1,33,column,0,782,1589
+gimmick_note=1,34,column,0,782,1589
 note=9904,pull,half
 
-note=10112,pull,half,312,full,156,0
+note=10112,pull,full,312,half,156,0
 
-gimmick_note=1,35,column,1,1406,2213
+gimmick_note=1,36,column,1,1406,2213
 note=10528,pull,half
 
-gimmick_note=1,36,column,0,1614,2421
+gimmick_note=1,37,column,0,1614,2421
 note=10736,pull,half
 
-gimmick_note=1,37,column,1,1822,2629
+gimmick_note=1,38,column,1,1822,2629
 note=10944,pull,half
 
 gimmick=2,screen_flash,10984,900,target=all,color=255:208:96,brightness=0.24,rate=4.0,pattern=checker
 
-gimmick_note=1,38,column,0,2030,2800
+gimmick_note=1,39,column,0,2030,2800
 note=11152,pull,half
 
-note=11360,pull,full,312,half,156,0
+gimmick_note=1,40,column,1,2238,2800
+note=11360,pull,half
 
-gimmick_note=1,40,column,1,2654,2800
+gimmick_note=1,41,column,0,2446,2800
+note=11568,pull,half
+
+gimmick_note=1,42,column,1,2654,2800
 note=11776,pull,half
 
 note=11984,pull,half
@@ -193,56 +199,60 @@ note=14896,pull,half
 note=15104,pull,half,312,full,156,0
 note=15520,pull,half
 
-gimmick_note=3,56,column,1,0,90
+gimmick_note=3,58,column,1,0,90
 note=15728,pull,half
 
-gimmick_note=3,57,column,0,0,298
+gimmick_note=3,59,column,0,0,298
 note=15936,pull,half
 
-gimmick_note=3,58,column,1,0,506
+gimmick_note=3,60,column,1,0,506
 note=16144,pull,half
 
 note=16352,pull,full,312,half,156,0
 
-gimmick_note=3,60,column,1,323,1130
+gimmick_note=3,62,column,1,323,1130
 note=16768,pull,half
 
-gimmick_note=3,61,column,0,531,1338
+gimmick_note=3,63,column,0,531,1338
 note=16976,pull,half,0,same,0,1
 
-gimmick_note=3,62,column,1,739,1546
+gimmick_note=3,64,column,1,739,1546
 note=17184,pull,half,0,same,0,1
 
-gimmick_note=3,63,column,0,947,1754
+gimmick_note=3,65,column,0,947,1754
 note=17392,pull,half,0,same,0,1
 
-note=17600,pull,half,312,full,156,1
+gimmick_note=3,66,column,1,1155,1962
+note=17600,pull,half,0,same,0,1
 
-gimmick_note=3,65,column,1,1571,2378
+gimmick_note=3,67,column,0,1363,2170
+note=17808,pull,half,0,same,0,1
+
+gimmick_note=3,68,column,1,1571,2378
 note=18016,pull,half,0,same,0,1
 
-gimmick_note=3,66,column,0,1779,2586
+gimmick_note=3,69,column,0,1779,2586
 note=18224,pull,half,0,same,0,1
 
 gimmick=4,lane_pulse,18306,2200,target=pull,color=64:96:255,brightness=0.18,rate=2.0,pattern=solid
 
-gimmick_note=3,67,column,1,1987,2794
+gimmick_note=3,70,column,1,1987,2794
 note=18432,pull,half,0,same,0,1
 
-gimmick_note=3,68,column,0,2195,2800
+gimmick_note=3,71,column,0,2195,2800
 note=18640,pull,half,0,same,0,1
 
-note=18848,pull,full,312,half,156,1
+note=18848,pull,half,312,full,156,1
 note=19264,pull,half,0,same,0,1
 note=19472,pull,half,0,same,0,1
 note=19680,pull,half,0,same,0,1
 note=19888,pull,half,0,same,0,1
-note=20096,pull,half,312,full,156,1
+note=20096,pull,full,312,half,156,1
 note=20512,pull,half,0,same,0,1
 note=20720,pull,half,0,same,0,1
 note=20928,pull,half,0,same,0,1
 note=21136,pull,half,0,same,0,1
-note=21344,pull,full,312,half,156,1
+note=21344,pull,half,312,full,156,1
 note=21760,pull,half,0,same,0,1
 mapping=2
 
@@ -256,56 +266,43 @@ note=4184,push,tap
 note=4496,pull,half
 note=4808,twist,right
 note=5120,push,tap
-note=5432,twist,right
-note=5744,pull,full,312,half,156,0
-note=6368,twist,left
-note=6680,twist,right
-note=6992,pull,half
+note=5536,push,tap
+note=5848,push,tap
+note=6160,pull,half
+note=6472,twist,right
+note=6784,push,tap
+note=7096,twist,right
 
 gimmick=1,wind,7322,2800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
 
 note=7408,pull,half
 note=7720,push,tap
 note=8032,twist,left
+note=8344,twist,right,832,left,416,0
 
-gimmick_note=1,19,column,1,0,29
-note=8344,twist,right
+gimmick_note=1,21,column,1,366,1173
+note=9488,pull,half
 
-gimmick_note=1,20,column,1,0,341
-note=8656,pull,half
+gimmick_note=1,22,column,1,678,1485
+note=9800,twist,right
 
-note=8968,twist,right,312,same,0,0
+gimmick_note=1,23,column,0,990,1797
+note=10112,push,tap
 
-gimmick_note=1,22,column,2,470,1277
-note=9592,push,tap
+gimmick_note=1,24,column,1,1302,2109
+note=10424,twist,right
 
-gimmick_note=1,23,column,1,782,1589
-note=9904,pull,half
-
-gimmick_note=1,24,column,2,1094,1901
-note=10216,push,tap
-
-gimmick_note=1,25,column,0,1406,2213
-note=10528,push,tap
-
-gimmick_note=1,26,column,2,1718,2525
-note=10840,push,tap
+note=10736,pull,half,312,full,156,0
 
 gimmick=2,screen_flash,10984,900,target=all,color=255:208:96,brightness=0.24,rate=4.0,pattern=checker
 
-gimmick_note=1,27,column,1,2030,2800
-note=11152,pull,half
+gimmick_note=1,26,column,1,2238,2800
+note=11360,twist,left
 
-gimmick_note=1,28,column,1,2446,2800
-note=11568,pull,half
-
-gimmick_note=1,29,column,0,2758,2800
-note=11880,push,tap
-
-note=12192,push,tap
-note=12504,push,tap
+note=11672,twist,left,832,right,416,0
 note=12816,pull,half
-note=13128,twist,right,312,same,0,0
+note=13128,twist,right
+note=13440,push,tap
 note=13752,twist,right
 note=14064,pull,half
 note=14376,push,tap
@@ -313,50 +310,36 @@ note=14376,push,tap
 gimmick=3,wind,14645,2800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
 
 note=14688,twist,left
-note=15000,twist,right,312,same,0,0
-note=15624,twist,right
+note=15000,twist,right,832,left,416,0
 
-gimmick_note=3,40,column,2,0,298
-note=15936,push,tap
+gimmick_note=3,36,column,1,0,506
+note=16144,pull,half
 
-gimmick_note=3,41,column,0,0,610
-note=16248,push,tap
+gimmick_note=3,37,column,1,11,818
+note=16456,twist,right
 
-gimmick_note=3,42,column,1,115,922
-note=16560,pull,half
+gimmick_note=3,38,column,2,323,1130
+note=16768,push,tap
 
-gimmick_note=3,43,column,0,427,1234
-note=16872,push,tap
+gimmick_note=3,39,column,1,635,1442
+note=17080,twist,right,0,same,0,1
 
-gimmick_note=3,44,column,2,739,1546
-note=17184,push,tap,0,same,0,1
+gimmick_note=3,40,column,1,947,1754
+note=17392,pull,half,0,same,0,1
 
-gimmick_note=3,45,column,0,1051,1858
-note=17496,push,tap,0,same,0,1
+gimmick_note=3,41,column,0,1259,2066
+note=17704,push,tap,0,same,0,1
 
-gimmick_note=3,46,column,1,1363,2170
-note=17808,pull,half,0,same,0,1
-
-gimmick_note=3,47,column,1,1675,2482
-note=18120,twist,right,0,same,0,1
+gimmick_note=3,42,column,1,1571,2378
+note=18016,twist,left,0,same,0,1
 
 gimmick=4,lane_pulse,18306,2200,target=pull,color=64:96:255,brightness=0.18,rate=2.0,pattern=solid
 
-gimmick_note=3,48,column,2,1987,2794
-note=18432,push,tap,0,same,0,1
-
-gimmick_note=3,49,column,1,2299,2800
-note=18744,twist,right,0,same,0,1
-
-gimmick_note=3,50,column,1,2611,2800
-note=19056,pull,half,0,same,0,1
-
-note=19368,push,tap,0,same,0,1
-note=19680,twist,left,0,same,0,1
-note=19992,twist,right,0,same,0,1
-note=20304,pull,half,0,same,0,1
-note=20616,twist,right,0,same,0,1
-note=20928,push,tap,0,same,0,1
-note=21240,push,tap,0,same,0,1
-note=21552,pull,half,0,same,0,1
-note=21864,push,tap,0,same,0,1
+note=18328,twist,left,832,right,416,1
+note=19472,pull,half,0,same,0,1
+note=19784,twist,right,0,same,0,1
+note=20096,push,tap,0,same,0,1
+note=20408,twist,right,0,same,0,1
+note=20720,pull,full,312,half,156,1
+note=21344,twist,left,0,same,0,1
+note=21656,twist,right,0,same,0,1

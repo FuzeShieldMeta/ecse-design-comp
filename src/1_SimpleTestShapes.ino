@@ -81,8 +81,8 @@ struct NoteDef {
   bool variant;  // left/right for twist, half/full for pull
   bool bonus;
   uint16_t holdMs;
-  bool endVariant;  // Pull state after an optional in-hold transition.
-  uint16_t pullTransitionMs;
+  bool endVariant;  // Twist/pull state after an optional hold transition.
+  uint16_t transitionMs;
   uint8_t startColumn;
   uint8_t endColumn;
   uint32_t shiftStartMs;
@@ -822,12 +822,25 @@ void handleAction(Lane physicalLane, Gesture gesture, uint32_t t) {
 }
 
 bool requiredHoldActive(const NoteDef &note, uint32_t t) {
-  if (note.lane == Lane::Twist)
-    return note.variant ? twistRight.stable : twistLeft.stable;
+  if (note.lane == Lane::Twist) {
+    bool requiresRight = note.variant;
+    if (note.transitionMs > 0) {
+      const uint32_t transitionAt = note.hitMs + note.transitionMs;
+      const uint32_t transitionDelta =
+          abs(static_cast<int32_t>(t - transitionAt));
+      // The spring control must pass through centre to reverse direction.
+      // Accept left, centre, or right within the normal timing window, but
+      // continue to reject the mechanically invalid both-switches state.
+      if (transitionDelta <= goodWindow())
+        return !(twistLeft.stable && twistRight.stable);
+      requiresRight = t < transitionAt ? note.variant : note.endVariant;
+    }
+    return requiresRight ? twistRight.stable : twistLeft.stable;
+  }
   if (note.lane == Lane::Pull) {
     const PullState state = readPullState();
-    if (note.pullTransitionMs > 0) {
-      const uint32_t transitionAt = note.hitMs + note.pullTransitionMs;
+    if (note.transitionMs > 0) {
+      const uint32_t transitionAt = note.hitMs + note.transitionMs;
       const uint32_t transitionDelta = abs(static_cast<int32_t>(t - transitionAt));
       // Either deliberate pull position is accepted around the state-change
       // marker, giving the player the same timing tolerance as a normal hit.
@@ -1414,6 +1427,18 @@ void twistSegmentGeometry(int centerX, bool turnRight,
   }
 }
 
+void drawTwistTrail(int centerX, int top, int bottom, bool turnRight) {
+  if (bottom < top) return;
+  int requiredX = 0;
+  int otherX = 0;
+  twistSegmentGeometry(centerX, turnRight, requiredX, otherX);
+  const int height = bottom - top + 1;
+  display->fillRect(requiredX, top, TWIST_REQUIRED_WIDTH, height,
+                    twistSplitColor(true, 1.0f));
+  display->fillRect(otherX, top, TWIST_OTHER_WIDTH, height,
+                    twistSplitColor(false, 1.0f));
+}
+
 void drawNote(const NoteDef &note, int x, float y, int noteTopY) {
 #if ENABLE_NOTE_SUBPIXEL_BLEND
   const int baseY = floorf(y);
@@ -1700,17 +1725,24 @@ void drawPlaying(uint32_t now) {
       if (railBottom >= railTop) {
         const int trailHeight = railBottom - railTop + 1;
         if (chart[i].lane == Lane::Twist) {
-          int requiredX = 0;
-          int otherX = 0;
-          twistSegmentGeometry(x, chart[i].variant, requiredX, otherX);
-          display->fillRect(requiredX, railTop, TWIST_REQUIRED_WIDTH,
-                            trailHeight, twistSplitColor(true, 1.0f));
-          display->fillRect(otherX, railTop, TWIST_OTHER_WIDTH,
-                            trailHeight, twistSplitColor(false, 1.0f));
-        } else if (chart[i].lane == Lane::Pull) {
-          if (chart[i].pullTransitionMs > 0) {
+          if (chart[i].transitionMs > 0) {
             const float transitionUntil =
-                chart[i].hitMs + chart[i].pullTransitionMs - preciseTimeMs;
+                chart[i].hitMs + chart[i].transitionMs - preciseTimeMs;
+            const float transitionY = NOTE_HIT_Y -
+                transitionUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
+                    NOTE_TRAVEL_MS;
+            const int transitionRow = static_cast<int>(lroundf(transitionY));
+            drawTwistTrail(x, railTop, min(railBottom, transitionRow),
+                           chart[i].endVariant);
+            drawTwistTrail(x, max(railTop, transitionRow + 1), railBottom,
+                           chart[i].variant);
+          } else {
+            drawTwistTrail(x, railTop, railBottom, chart[i].variant);
+          }
+        } else if (chart[i].lane == Lane::Pull) {
+          if (chart[i].transitionMs > 0) {
+            const float transitionUntil =
+                chart[i].hitMs + chart[i].transitionMs - preciseTimeMs;
             const float transitionY = NOTE_HIT_Y -
                 transitionUntil * static_cast<float>(NOTE_HIT_Y - noteTopY) /
                     NOTE_TRAVEL_MS;
