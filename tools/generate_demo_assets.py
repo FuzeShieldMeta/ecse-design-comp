@@ -21,19 +21,19 @@ OUTPUT = Path(__file__).resolve().parents[1] / "data" / "songs"
 SONGS = (
     {
         "slug": "test-grid", "title": "TEST GRID", "bpm": 96,
-        "bars": 8, "difficulty": 0, "color": "00EAFF",
+        "bars": 8, "color": "00EAFF",
         "melody": (72, -1, 72, 76, 67, -1, 67, 79, 72, -1, 76, 79, 67, 72, 79, -1),
         "bass": (48, -1, -1, -1, 48, -1, -1, -1, 53, -1, -1, -1, 55, -1, -1, -1),
     },
     {
         "slug": "sync-step", "title": "SYNC STEP", "bpm": 120,
-        "bars": 10, "difficulty": 1, "color": "FF28BA",
+        "bars": 10, "color": "FF28BA",
         "melody": (72, 76, 79, 76, 67, 72, 76, 79, 72, 79, 81, 79, 76, 72, 67, -1),
         "bass": (48, -1, 48, -1, 53, -1, 53, -1, 55, -1, 55, -1, 53, -1, 50, -1),
     },
     {
         "slug": "pull-rush", "title": "PULL RUSH", "bpm": 144,
-        "bars": 12, "difficulty": 2, "color": "FFB000",
+        "bars": 12, "color": "FFB000",
         "melody": (72, 79, 76, 84, 79, 76, 72, 67, 72, 76, 79, 84, 81, 79, 76, 72),
         "bass": (48, -1, 48, 48, 53, -1, 53, 53, 55, -1, 55, 55, 58, 55, 53, 50),
     },
@@ -149,14 +149,32 @@ def render_loop(song: dict, destination: Path) -> None:
         output.writeframes(frames)
 
 
-def build_notes(song_index: int, song: dict) -> tuple[list[dict], int, list[tuple[int, int]]]:
+def build_notes(song_index: int, song: dict,
+                difficulty: int) -> tuple[list[dict], int, list[tuple[int, int]]]:
     step_ms = 60_000 // song["bpm"] // 4
     total_steps = song["bars"] * 16
     notes: list[dict] = []
     twist_count = pull_count = transition_count = 0
 
-    for step in range(0, total_steps, 2):
-        lane = (step // 2 + step // 16 + song_index) % 3
+    for step in range(total_steps):
+        pattern_step = step % 16
+        melody = song["melody"][pattern_step]
+        bass = song["bass"][pattern_step]
+        if difficulty == 0 and step % 4 != 0:
+            continue
+        if difficulty == 1 and step % 2 != 0:
+            continue
+        if difficulty == 2 and melody < 0 and bass < 0:
+            continue
+
+        # Bass attacks use pull, upper melody uses twist, and the remaining
+        # melodic rhythm uses push. This makes the charts follow each loop.
+        if bass >= 0 and (difficulty < 2 or melody < 0 or step % 4 == 0):
+            lane = 2
+        elif melody >= 79:
+            lane = 0
+        else:
+            lane = 1
         long_hold = False
         if lane == 0:
             twist_count += 1
@@ -165,7 +183,7 @@ def build_notes(song_index: int, song: dict) -> tuple[list[dict], int, list[tupl
             pull_count += 1
             long_hold = pull_count % 6 == 4
         hold_ms = step_ms * 3 if long_hold else 0
-        variant = bool(((step // 2) + song_index) & 1)
+        variant = bool((step + song_index) & 1)
         end_variant = variant
         transition_ms = 0
         if lane == 2 and long_hold:
@@ -180,9 +198,10 @@ def build_notes(song_index: int, song: dict) -> tuple[list[dict], int, list[tupl
             "transition": transition_ms, "end_col": lane,
             "shift_start": 0, "shift_end": 0, "gimmick_id": 0,
         })
-        if step > 0 and step % 24 == 0:
-            second = (lane + 1) % 3
-            second_variant = bool((step // 8) & 1)
+        if (difficulty == 2 and bass >= 0 and melody >= 0 and lane != 2 and
+                step % 4 == 0):
+            second = 2
+            second_variant = bool((step // 4) & 1)
             notes.append({
                 "hit": 2000 + step * step_ms, "lane": second,
                 "variant": second_variant, "bonus": True, "hold": 0,
@@ -190,6 +209,16 @@ def build_notes(song_index: int, song: dict) -> tuple[list[dict], int, list[tupl
                 "end_col": second, "shift_start": 0, "shift_end": 0,
                 "gimmick_id": 0,
             })
+
+    notes.sort(key=lambda note: (note["hit"], note["lane"]))
+    control_held_until = [0, 0, 0]
+    filtered: list[dict] = []
+    for note in notes:
+        if note["hit"] < control_held_until[note["lane"]]:
+            continue
+        filtered.append(note)
+        control_held_until[note["lane"]] = note["hit"] + note["hold"]
+    notes = filtered
 
     duration = 2000 + total_steps * step_ms
     gusts = ((duration // 3, 2800), (duration * 2 // 3, 2800))
@@ -216,7 +245,7 @@ def build_notes(song_index: int, song: dict) -> tuple[list[dict], int, list[tupl
             choices.extend((desired - distance, desired + distance))
         chosen = next(
             (column for column in choices
-             if 0 <= column < 3 and note["hit"] > occupied_until[column]),
+             if 0 <= column < 3 and note["hit"] >= occupied_until[column]),
             desired,
         )
         if note["shift_end"] > 0:
@@ -234,13 +263,14 @@ def action(lane: int, variant: bool) -> str:
 
 
 def write_chart(song_index: int, song: dict, destination: Path) -> None:
-    notes, duration, gusts = build_notes(song_index, song)
+    mappings = [build_notes(song_index, song, difficulty)[0]
+                for difficulty in range(3)]
+    _, duration, gusts = build_notes(song_index, song, 0)
     lines = [
         "# Generated by tools/generate_demo_assets.py",
         f"title={song['title']}",
         "artist=BOP LAB",
         f"bpm={song['bpm']}",
-        f"difficulty={song['difficulty']}",
         f"color=#{song['color']}",
         f"audio=/songs/{song['slug']}.wav",
         f"cover=/songs/{song['slug']}.rgb888",
@@ -249,75 +279,81 @@ def write_chart(song_index: int, song: dict, destination: Path) -> None:
         f"duration={duration}",
         "",
     ]
-    for note_id, note in enumerate(notes, start=1):
-        note["id"] = note_id
-    gimmicks: list[dict] = []
-    for gimmick_id, (start, length) in enumerate(gusts, start=1):
-        gimmicks.append({
-            "wind_index": gimmick_id, "type": "wind", "start": start,
-            "duration": length,
-            "parameters": ("target=all,color=35:130:180,brightness=1.0,"
-                           "direction=right,speed=1.0,density=4"),
-        })
-    pulse_targets = ("push", "twist", "pull")
-    pulse_colors = ("64:255:96", "255:64:64", "64:96:255")
-    gimmicks.extend((
-        {
-            "type": "screen_flash", "start": duration // 2,
-            "duration": 900,
-            "parameters": ("target=all,color=255:208:96,brightness=0.24,"
-                           "rate=4.0,pattern=checker"),
-        },
-        {
-            "type": "lane_pulse", "start": duration * 5 // 6,
-            "duration": 2200,
-            "parameters": (f"target={pulse_targets[song_index]},"
-                           f"color={pulse_colors[song_index]},brightness=0.18,"
-                           "rate=2.0,pattern=solid"),
-        },
-    ))
-    gimmicks.sort(key=lambda gimmick: gimmick["start"])
-    for gimmick_id, gimmick in enumerate(gimmicks, start=1):
-        gimmick["id"] = gimmick_id
-    wind_ids = {gimmick["wind_index"]: gimmick["id"] for gimmick in gimmicks
-                if "wind_index" in gimmick}
-
-    event_blocks: list[tuple[int, int, list[str], bool]] = []
-    for gimmick in gimmicks:
-        event_blocks.append((
-            gimmick["start"], 0,
-            [f"gimmick={gimmick['id']},{gimmick['type']},"
-             f"{gimmick['start']},{gimmick['duration']},"
-             f"{gimmick['parameters']}"], True,
+    for mapping, notes in enumerate(mappings):
+        lines.extend((f"mapping={mapping}", ""))
+        for note_id, note in enumerate(notes, start=1):
+            note["id"] = note_id
+        gimmicks: list[dict] = []
+        for gimmick_id, (start, length) in enumerate(gusts, start=1):
+            gimmicks.append({
+                "wind_index": gimmick_id, "type": "wind", "start": start,
+                "duration": length,
+                "parameters": ("target=all,color=35:130:180,brightness=1.0,"
+                               "direction=right,speed=1.0,density=4"),
+            })
+        pulse_targets = ("push", "twist", "pull")
+        pulse_colors = ("64:255:96", "255:64:64", "64:96:255")
+        gimmicks.extend((
+            {
+                "type": "screen_flash", "start": duration // 2,
+                "duration": 900,
+                "parameters": ("target=all,color=255:208:96,brightness=0.24,"
+                               "rate=4.0,pattern=checker"),
+            },
+            {
+                "type": "lane_pulse", "start": duration * 5 // 6,
+                "duration": 2200,
+                "parameters": (f"target={pulse_targets[song_index]},"
+                               f"color={pulse_colors[song_index]},brightness=0.18,"
+                               "rate=2.0,pattern=solid"),
+            },
         ))
-    for note in notes:
-        lane_name = ("twist", "push", "pull")[note["lane"]]
-        end = (action(note["lane"], note["end_variant"])
-               if note["end_variant"] != note["variant"] else "same")
-        fields = [str(note["hit"]), lane_name,
-                  action(note["lane"], note["variant"])]
-        if note["hold"] or end != "same" or note["transition"] or note["bonus"]:
-            fields.extend((str(note["hold"]), end,
-                           str(note["transition"]), str(int(note["bonus"]))))
-        block: list[str] = []
-        if note["gimmick_id"]:
-            gust_start = gusts[note["gimmick_id"] - 1][0]
-            block.append(
-                f"gimmick_note={wind_ids[note['gimmick_id']]},"
-                f"{note['id']},column,"
-                f"{note['end_col']},{note['shift_start'] - gust_start},"
-                f"{note['shift_end'] - gust_start}"
-            )
-        block.append("note=" + ",".join(fields))
-        event_blocks.append((note["hit"], 1, block,
-                             bool(note["gimmick_id"])))
+        gimmicks.sort(key=lambda gimmick: gimmick["start"])
+        for gimmick_id, gimmick in enumerate(gimmicks, start=1):
+            gimmick["id"] = gimmick_id
+        wind_ids = {
+            gimmick["wind_index"]: gimmick["id"] for gimmick in gimmicks
+            if "wind_index" in gimmick
+        }
 
-    for _, _, block, separated in sorted(event_blocks):
-        if separated and lines[-1] != "":
-            lines.append("")
-        lines.extend(block)
-        if separated:
-            lines.append("")
+        event_blocks: list[tuple[int, int, list[str], bool]] = []
+        for gimmick in gimmicks:
+            event_blocks.append((
+                gimmick["start"], 0,
+                [f"gimmick={gimmick['id']},{gimmick['type']},"
+                 f"{gimmick['start']},{gimmick['duration']},"
+                 f"{gimmick['parameters']}"], True,
+            ))
+        for note in notes:
+            lane_name = ("twist", "push", "pull")[note["lane"]]
+            end = (action(note["lane"], note["end_variant"])
+                   if note["end_variant"] != note["variant"] else "same")
+            fields = [str(note["hit"]), lane_name,
+                      action(note["lane"], note["variant"])]
+            if (note["hold"] or end != "same" or note["transition"] or
+                    note["bonus"]):
+                fields.extend((str(note["hold"]), end,
+                               str(note["transition"]),
+                               str(int(note["bonus"]))))
+            block: list[str] = []
+            if note["gimmick_id"]:
+                gust_start = gusts[note["gimmick_id"] - 1][0]
+                block.append(
+                    f"gimmick_note={wind_ids[note['gimmick_id']]},"
+                    f"{note['id']},column,"
+                    f"{note['end_col']},{note['shift_start'] - gust_start},"
+                    f"{note['shift_end'] - gust_start}"
+                )
+            block.append("note=" + ",".join(fields))
+            event_blocks.append((note["hit"], 1, block,
+                                 bool(note["gimmick_id"])))
+
+        for _, _, block, separated in sorted(event_blocks):
+            if separated and lines[-1] != "":
+                lines.append("")
+            lines.extend(block)
+            if separated:
+                lines.append("")
     while lines and lines[-1] == "":
         lines.pop()
     destination.write_text("\n".join(lines) + "\n", encoding="utf-8")

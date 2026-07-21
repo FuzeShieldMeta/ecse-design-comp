@@ -92,11 +92,16 @@ be fitted for consistent noise immunity.
 - Twist right: the GPIO35 switch closes to GND.
 - The spring mechanism must return the block to centre when released.
 - The mechanics should prevent both twist switches closing simultaneously.
+- On song selection, twist moves through the circular song carousel. In the
+  difficulty popup it moves through EASY, NORM, and HARD without wrapping past
+  either end.
 
 ### Push button
 
 Use a normally-open momentary button between GPIO36 and GND. On the song-select
-screen this starts the selected song; during gameplay it controls the push lane.
+screen it opens the selected song's difficulty popup. Press it again to confirm
+the highlighted difficulty and start the song. During gameplay it controls the
+push lane.
 
 ### Pull mechanism
 
@@ -108,6 +113,8 @@ screen this starts the selected song; during gameplay it controls the push lane.
 The firmware detects a half-pull action when the mechanism leaves the rest
 switch and detects a full-pull action when the full switch closes. Position the
 switches so the rest switch releases before the full switch can close.
+A full/hard pull in the difficulty popup cancels it and returns to the song
+carousel without starting the song.
 
 Pull notes use two visual states. A solid blue note requests full extension; a
 blue note that becomes noticeably darker toward its centre requests the
@@ -173,8 +180,9 @@ to be common for the signals used here.
 All songs are loaded from the ESP32's LittleFS partition. There are no
 firmware-compiled songs: if the filesystem is missing or contains no valid
 charts, the display shows `NO SONG FILES` instead of starting an empty game.
-The importer supports up to eight external songs, 220 notes, 24 gimmicks, and
-128 gimmick-to-note effects per chart.
+The importer supports up to eight external songs. Each of a song's three
+difficulty mappings may contain up to 220 notes, 24 gimmicks, and 128
+gimmick-to-note effects.
 
 The former `TEST GRID`, `SYNC STEP`, and `PULL RUSH` demonstrations are now
 ordinary imported charts with accompanying loopable mono WAV files in
@@ -216,17 +224,27 @@ not copied into the device filesystem.
 title=EXAMPLE SONG
 artist=YOUR NAME
 bpm=120
-difficulty=1
 color=#8A32FF
 audio=/songs/example.wav
 cover=/songs/example.rgb888
 audio_start=0
 audio_loop=0
 duration=12000
+
+mapping=0
+note=2000,twist,left
+
+mapping=1
+note=2000,twist,left
+note=2500,push,tap
+
+mapping=2
+note=2000,twist,left
+note=2250,pull,half
+note=2500,push,tap
 ```
 
 - `title` and `artist` are limited to 16 characters.
-- `difficulty` is `0`, `1`, or `2`.
 - `color` is the six-digit RGB cover-art colour.
 - `cover` is the absolute path to an exact 36×36 raw RGB888 cover asset.
   The colour is retained as the carousel border and missing-cover fallback.
@@ -237,6 +255,13 @@ duration=12000
 - `audio_loop=1` loops the WAV until the chart ends. This permits a short music
   loop to accompany a longer chart without exhausting onboard flash.
 
+Every chart must contain `mapping=0`, `mapping=1`, and `mapping=2` sections,
+shown as EASY, NORM, and HARD. Push opens the difficulty popup, twist highlights
+a bounded option, and push confirms it. A full/hard pull cancels the popup.
+Difficulty does not shrink the judgement windows: every mapping uses the same
+70 ms Perfect and 130 ms Good windows. Each successive mapping instead contains
+a denser transcription of the music's rhythmic and spectral cues.
+
 Each note uses this comma-separated layout:
 
 ```text
@@ -244,10 +269,11 @@ note=hit_ms,lane,action[,hold_ms,end_action,transition_ms,bonus]
 ```
 
 The first three fields are required. Optional hold fields are omitted entirely
-for ordinary notes. Notes receive automatic 1-based IDs in file order: the
-first `note=` line is note 1, the second is note 2, and so on. Gimmicks use
-these generated IDs, so rearranging note lines requires updating their
-`gimmick_note` references.
+for ordinary notes. Within each mapping, notes receive automatic 1-based IDs in
+file order: the first `note=` line is note 1, the second is note 2, and so on.
+IDs restart at 1 in the next mapping. Gimmicks and their `gimmick_note`
+references belong to the mapping in which they appear, so rearranging note
+lines requires updating references in that mapping.
 
 | Field | Accepted values |
 |---|---|
@@ -451,7 +477,7 @@ an 11.025 kHz/8-bit mono game asset, synchronized contextual chart, strict
 36×36 RGB888 cover, and manifest entry. Regenerate Revenge with:
 
 ```sh
-python3 tools/import_song.py /path/to/revenge.wav --cover assets/covers/revenge.png --title Revenge --artist CaptainSparklez --slug revenge --difficulty 2 --color 42E66C
+python3 tools/import_song.py /path/to/revenge.wav --cover assets/covers/revenge.png --title Revenge --artist CaptainSparklez --slug revenge --color 42E66C
 ```
 
 For another song, change the source, cover, title, artist, and optional
@@ -462,7 +488,13 @@ files for inspection without registering them.
 
 The generator estimates tempo and beat phase, detects strong offbeats and
 sustained passages, maps low/mid/high spectral emphasis to pull/push/twist, and
-places wind gusts at major energy changes. It selects multiple well-separated
+places wind gusts at major energy changes. It creates all three mappings in one
+pass: EASY follows a half-note grid, NORM a quarter-note grid, and HARD an
+eighth-note grid. During the first 12 seconds it measures the relative onset
+strength of an eight-slot/four-beat phrase and repeats the strongest two, four,
+or six positions for EASY, NORM, or HARD. This preserves a recognizable opening
+rhythm briefly instead of immediately reverting to a generic grid. It selects
+multiple well-separated
 screen flashes from strong isolated onsets and lane pulses from separate
 sustained high-energy sections; the dominant low/mid/high band selects
 pull/push/twist for each pulse. Revenge therefore flashes near 22.48 and 38.98
@@ -473,14 +505,19 @@ arbitrary intervals. It requires Python 3, NumPy, and FFmpeg.
 
 The current testing build enables `STARTUP_SELF_TEST` near the top of
 `src/1_SimpleTestShapes.ino`. After boot, it advances the cover-art carousel
-up to three times at two-second intervals, without wrapping past the final
-available song. It holds the final cover for one second and then starts and
-autoplays that song through to the results screen. After a
-two-second result hold, it advances the carousel by one song, displays the new
-cover for one second, and autoplays again. This later repeating loop is circular
-and includes every valid entry in the import manifest. Physical song selection
-remains locked while the repeating
-demonstration is active.
+up to three times at two-second intervals, without wrapping past Revenge. It
+holds the Revenge cover for one second and then overlays the smaller difficulty
+popup without clearing or rebuilding the song-selection screen. The original
+Revenge title remains visible below it. The popup holds EASY for two seconds and
+starts Revenge. After the result screen, the demo returns to the same Revenge
+cover and popup for NORM, then repeats once more for HARD. Each popup remains
+visible for two seconds before its run begins.
+
+After the HARD Revenge result has remained visible for two seconds, the
+repeating demo advances circularly to the next manifest song, holds its cover
+for one second, opens its difficulty popup for two seconds, and starts it. This
+later loop includes every valid manifest entry. Physical song and difficulty
+selection remain locked while the deterministic demonstration is active.
 
 Set the following value to `0` when testing is complete and normal manual song
 selection should begin immediately at boot:

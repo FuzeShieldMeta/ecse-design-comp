@@ -22,7 +22,6 @@ struct Song {
   char audioPath[48];
   char coverPath[48];
   uint16_t bpm;
-  uint8_t difficulty;
   uint32_t color;
   uint32_t durationMs;
   uint32_t audioStartMs;
@@ -89,7 +88,7 @@ struct Chart {
 bool begin();
 size_t songCount();
 const Song *song(size_t index);
-bool loadChart(size_t index, Chart &out);
+bool loadChart(size_t index, uint8_t mapping, Chart &out);
 // Loads the exact 36x36 raw RGB888 asset referenced by cover= in the chart.
 bool loadCover(size_t index, uint8_t *destination, size_t byteCapacity);
 

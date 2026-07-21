@@ -140,7 +140,6 @@ bool readMetadata(const char *path, Song &out) {
   out.audioPath[0] = '\0';
   out.coverPath[0] = '\0';
   out.bpm = 120;
-  out.difficulty = 0;
   out.color = 0x00EAFF;
   out.durationMs = 0;
   out.audioStartMs = 0;
@@ -161,8 +160,6 @@ bool readMetadata(const char *path, Song &out) {
       strlcpy(out.coverPath, value.c_str(), sizeof(out.coverPath));
     else if (line.startsWith("bpm="))
       out.bpm = constrain(value.toInt(), 30, 300);
-    else if (line.startsWith("difficulty="))
-      out.difficulty = constrain(value.toInt(), 0, 2);
     else if (line.startsWith("color="))
       out.color = parseColor(value);
     else if (line.startsWith("duration="))
@@ -353,9 +350,9 @@ bool loadCover(size_t index, uint8_t *destination, size_t byteCapacity) {
   return read == COVER_RGB888_BYTES;
 }
 
-bool loadChart(size_t index, Chart &out) {
+bool loadChart(size_t index, uint8_t mapping, Chart &out) {
   const Song *metadata = song(index);
-  if (metadata == nullptr || !filesystemMounted) return false;
+  if (metadata == nullptr || !filesystemMounted || mapping > 2) return false;
   File file = LittleFS.open(metadata->chartPath, "r");
   if (!file) return false;
 
@@ -365,10 +362,26 @@ bool loadChart(size_t index, Chart &out) {
   out.durationMs = metadata->durationMs;
   uint32_t inferredDuration = 0;
   bool parseError = false;
+  int8_t activeMapping = -1;
+  bool selectedMappingFound = false;
   while (file.available()) {
     String line = file.readStringUntil('\n');
     line.trim();
     if (line.isEmpty() || line.startsWith("#")) continue;
+    if (line.startsWith("mapping=")) {
+      const String value = valueAfterEquals(line);
+      if (value.length() != 1 || value[0] < '0' || value[0] > '2') {
+        parseError = true;
+        continue;
+      }
+      activeMapping = static_cast<int8_t>(value[0] - '0');
+      if (activeMapping == mapping) {
+        if (selectedMappingFound) parseError = true;
+        selectedMappingFound = true;
+      }
+      continue;
+    }
+    if (activeMapping != mapping) continue;
     if (line.startsWith("note=")) {
       ChartNote parsed{};
       if (out.noteCount < MAX_NOTES &&
@@ -393,7 +406,7 @@ bool loadChart(size_t index, Chart &out) {
     }
   }
   file.close();
-  if (parseError || out.noteCount == 0) return false;
+  if (parseError || !selectedMappingFound || out.noteCount == 0) return false;
   for (size_t i = 0; i < out.gimmickCount; ++i) {
     for (size_t j = i + 1; j < out.gimmickCount; ++j)
       if (out.gimmicks[i].id == out.gimmicks[j].id) return false;

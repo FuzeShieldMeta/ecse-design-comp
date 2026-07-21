@@ -52,6 +52,7 @@
 #define SELF_TEST_CAROUSEL_CYCLES 3
 #define SELF_TEST_CAROUSEL_INTERVAL_MS 2000UL
 #define SELF_TEST_FINAL_COVER_HOLD_MS 1000UL
+#define SELF_TEST_DIFFICULTY_INTERVAL_MS 2000UL
 #define SELF_TEST_RESULT_HOLD_MS 2000UL
 #define SELF_TEST_NEXT_COVER_HOLD_MS 1000UL
 #define DEFAULT_RENDER_INTERVAL_US 20000UL
@@ -63,10 +64,15 @@ VirtualMatrixPanel_T<PANEL_CHAIN_TYPE> *display = nullptr;
 enum class Lane : uint8_t { Twist, Push, Pull };
 enum class Gesture : uint8_t { None, TwistLeft, TwistRight, PullHalf, PullFull };
 enum class Judgment : uint8_t { None, Perfect, Good, Miss };
-enum class Screen : uint8_t { Select, Playing, Paused, Results, Failed };
+enum class Screen : uint8_t {
+  Select, DifficultySelect, Playing, Paused, Results, Failed
+};
 enum class DisplayProfile : uint8_t { None, Select, Game };
 enum class GimmickType : uint8_t { WindGust, ScreenFlash, LanePulse };
 enum class PullState : uint8_t { Rest, Half, Full, Fault };
+enum class StartupTestPhase : uint8_t {
+  Carousel, FinalCover, DifficultyWait
+};
 
 struct NoteDef {
   uint32_t hitMs;
@@ -132,6 +138,7 @@ GimmickDef gimmicks[GIMMICK_COUNT]{};
 size_t noteCount = 0;
 uint32_t songDurationMs = 0;
 volatile uint8_t selectedSong = 0;
+volatile uint8_t selectedDifficulty = 1;
 int8_t carouselSlide = 0;
 uint32_t carouselChangedAt = 0;
 
@@ -198,7 +205,6 @@ uint32_t healthAnimationAt = 0;
 uint32_t healthRegenAt = 0;
 uint8_t healthRegenFromWidth = 0;
 uint8_t healthRegenToWidth = 0;
-uint8_t difficulty = 1;
 Judgment lastJudgment = Judgment::None;
 Lane lastJudgmentLane = Lane::Push;
 uint32_t judgmentShownAt = 0;
@@ -211,8 +217,12 @@ uint32_t renderIntervalUs = DEFAULT_RENDER_INTERVAL_US;
 bool startupTestActive = STARTUP_SELF_TEST;
 bool startupAutoPlay = false;
 bool startupDemoRestartPending = false;
+bool startupDemoDifficultyPending = false;
+bool startupRevengeSequenceActive = false;
+uint8_t startupRevengeRunsCompleted = 0;
 uint8_t startupCarouselCycles = 0;
 uint32_t startupTestChangedAt = 0;
+StartupTestPhase startupTestPhase = StartupTestPhase::Carousel;
 volatile uint32_t audioRunGeneration = 0;
 BopImport::Chart importedChart{};
 uint8_t songCovers[BopImport::MAX_SONGS][BopImport::COVER_RGB888_BYTES]{};
@@ -241,11 +251,6 @@ uint16_t songBpm(size_t index) {
   return external != nullptr ? external->bpm : 120;
 }
 
-uint8_t songDifficulty(size_t index) {
-  const BopImport::Song *external = importedSong(index);
-  return external != nullptr ? external->difficulty : 0;
-}
-
 uint32_t songCoverColor(size_t index) {
   const BopImport::Song *external = importedSong(index);
   return external != nullptr ? external->color : 0;
@@ -266,15 +271,19 @@ uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 uint32_t songTime(uint32_t now) {
-  return now - runStartedAt;
+  const int32_t elapsed = static_cast<int32_t>(now - runStartedAt);
+  // A run can begin after the caller captured its frame timestamp because the
+  // display-profile rebuild takes time. Never let that older timestamp wrap
+  // into a multi-billion-millisecond song time and instantly finish the chart.
+  return elapsed < 0 ? 0 : static_cast<uint32_t>(elapsed);
 }
 
 uint16_t perfectWindow() {
-  return difficulty == 0 ? 95 : difficulty == 1 ? 70 : 50;
+  return 70;
 }
 
 uint16_t goodWindow() {
-  return difficulty == 0 ? 175 : difficulty == 1 ? 130 : 95;
+  return 130;
 }
 
 PullState readPullState() {
@@ -285,8 +294,9 @@ PullState readPullState() {
 }
 
 bool buildImportedChart() {
-  if (!BopImport::loadChart(selectedSong, importedChart)) {
-    Serial.printf("Chart import failed for song %u\n", selectedSong);
+  if (!BopImport::loadChart(selectedSong, selectedDifficulty, importedChart)) {
+    Serial.printf("Chart import failed for song %u mapping %u\n",
+                  selectedSong, selectedDifficulty);
     return false;
   }
 
@@ -347,8 +357,9 @@ bool buildImportedChart() {
   return true;
 }
 
-void buildChart() {
-  if (!buildImportedChart()) {
+bool buildChart() {
+  const bool loaded = buildImportedChart();
+  if (!loaded) {
     noteCount = 0;
     songDurationMs = 3000;
     for (GimmickDef &gimmick : gimmicks) gimmick.durationMs = 0;
@@ -359,6 +370,7 @@ void buildChart() {
   memset(holdLastScoreAt, 0, sizeof(holdLastScoreAt));
   memset(holdScoreAccumulator, 0, sizeof(holdScoreAccumulator));
   for (Judgment &result : holdStartJudgment) result = Judgment::None;
+  return loaded;
 }
 
 bool initAudio() {
@@ -448,12 +460,20 @@ void audioTask(void *) {
   }
 }
 
-void startRun(uint32_t now) {
-  if (songCount() == 0 || selectedSong >= songCount()) return;
-  buildChart();
+bool startRun(uint32_t now) {
+  if (songCount() == 0 || selectedSong >= songCount()) return false;
+  Serial.printf("Starting song %u mapping %u\n", selectedSong,
+                selectedDifficulty);
+  if (!buildChart()) {
+    Serial.println(F("Selected chart mapping failed to load; run not started"));
+    return false;
+  }
   // Stop and release the high-colour selection buffers before timing or audio
   // begins, then allocate the faster gameplay profile from a clean heap.
-  if (!rebuildDisplay(DisplayProfile::Game)) return;
+  if (!rebuildDisplay(DisplayProfile::Game)) {
+    Serial.println(F("Gameplay display transition failed; run not started"));
+    return false;
+  }
   now = millis();
   score = 0;
   combo = maxCombo = perfects = goods = misses = 0;
@@ -464,7 +484,6 @@ void startRun(uint32_t now) {
   healthAnimationAt = now;
   healthRegenAt = 0;
   healthRegenFromWidth = healthRegenToWidth = HEALTH_BAR_WIDTH;
-  difficulty = songDifficulty(selectedSong);
   lastJudgment = Judgment::None;
   for (uint8_t lane = 0; lane < 3; ++lane) {
     laneJudgments[lane] = Judgment::None;
@@ -475,6 +494,7 @@ void startRun(uint32_t now) {
   runStartedAtUs = micros();
   ++audioRunGeneration;
   screen = Screen::Playing;
+  return true;
 }
 
 uint8_t scoreMultiplier() {
@@ -566,32 +586,60 @@ void judge(Judgment result, Lane lane, bool bonus = false) {
 }
 
 void updateStartupSelfTest(uint32_t now) {
-  if (!startupTestActive || screen != Screen::Select) return;
+  if (!startupTestActive) return;
   if (songCount() == 0) {
     startupTestActive = false;
     return;
   }
 
-  // Startup is a linear preview of the imported index, not a circular pass.
-  // Clamp the requested test steps to the last song so a missing/removed chart
-  // can never make the initial preview wrap from its final entry to song zero.
-  const uint8_t startupStepLimit = min<size_t>(
-      SELF_TEST_CAROUSEL_CYCLES, songCount() - 1);
-  if (startupCarouselCycles < startupStepLimit) {
-    if (now - startupTestChangedAt < SELF_TEST_CAROUSEL_INTERVAL_MS) return;
-    ++selectedSong;
-    carouselSlide = 1;
-    carouselChangedAt = now;
+  if (startupTestPhase == StartupTestPhase::Carousel) {
+    // Preview linearly through the manifest to Revenge without wrapping.
+    const uint8_t startupStepLimit = min<size_t>(
+        SELF_TEST_CAROUSEL_CYCLES, songCount() - 1);
+    if (startupCarouselCycles < startupStepLimit) {
+      if (now - startupTestChangedAt < SELF_TEST_CAROUSEL_INTERVAL_MS) return;
+      ++selectedSong;
+      carouselSlide = 1;
+      carouselChangedAt = now;
+      startupTestChangedAt = now;
+      ++startupCarouselCycles;
+      if (startupCarouselCycles == startupStepLimit)
+        startupTestPhase = StartupTestPhase::FinalCover;
+      return;
+    }
+    startupTestPhase = StartupTestPhase::FinalCover;
     startupTestChangedAt = now;
-    ++startupCarouselCycles;
     return;
   }
 
-  // Let the final slide settle so its cover is visible before entering.
-  if (now - startupTestChangedAt >= SELF_TEST_FINAL_COVER_HOLD_MS) {
-    startupTestActive = false;
-    startupAutoPlay = true;
-    startRun(now);
+  if (startupTestPhase == StartupTestPhase::FinalCover) {
+    if (now - startupTestChangedAt < SELF_TEST_FINAL_COVER_HOLD_MS) return;
+    // Preserve the final carousel selection (Revenge in the current manifest)
+    // and overlay its difficulty picker without clearing either select buffer.
+    carouselSlide = 0;
+    selectedDifficulty = 0;
+    screen = Screen::DifficultySelect;
+    carouselChangedAt = now;
+    startupTestPhase = StartupTestPhase::DifficultyWait;
+    startupTestChangedAt = now;
+    Serial.printf("Startup demo difficulty popup: song %u\n", selectedSong);
+    return;
+  }
+
+  if (startupTestPhase == StartupTestPhase::DifficultyWait &&
+      screen == Screen::DifficultySelect &&
+      now - startupTestChangedAt >= SELF_TEST_DIFFICULTY_INTERVAL_MS) {
+    // Start with EASY. The results transition will return to this same song
+    // for NORM and HARD before the circular song carousel resumes.
+    if (startRun(now)) {
+      startupTestActive = false;
+      startupAutoPlay = true;
+      startupRevengeSequenceActive = true;
+      startupRevengeRunsCompleted = 0;
+    } else {
+      // Leave the popup/test state intact and retry after a short visible hold.
+      startupTestChangedAt = now;
+    }
   }
 }
 
@@ -660,13 +708,23 @@ void updateRepeatingDemo(uint32_t now) {
       return;
     }
 
-    // Advance exactly one cover between demo runs. Leave the select screen
-    // visible while the carousel slide settles before starting the next song.
-    selectedSong = (selectedSong + 1) % songCount();
-    carouselSlide = 1;
+    // Run Revenge consecutively on EASY, NORM, and HARD. Only after HARD has
+    // finished does the ordinary circular song sequence advance to song zero.
+    if (startupRevengeSequenceActive && startupRevengeRunsCompleted < 2) {
+      ++startupRevengeRunsCompleted;
+      selectedDifficulty = startupRevengeRunsCompleted;
+      carouselSlide = 0;
+      Serial.printf("Startup demo repeats Revenge on mapping %u\n",
+                    selectedDifficulty);
+    } else {
+      startupRevengeSequenceActive = false;
+      selectedSong = (selectedSong + 1) % songCount();
+      carouselSlide = 1;
+    }
     carouselChangedAt = now;
     startupTestChangedAt = now;
     startupDemoRestartPending = true;
+    startupDemoDifficultyPending = false;
     screen = Screen::Select;
     return;
   }
@@ -674,7 +732,20 @@ void updateRepeatingDemo(uint32_t now) {
   if (screen == Screen::Select && startupDemoRestartPending &&
       now - startupTestChangedAt >= SELF_TEST_NEXT_COVER_HOLD_MS) {
     startupDemoRestartPending = false;
-    startRun(now);
+    startupDemoDifficultyPending = true;
+    startupTestChangedAt = now;
+    carouselChangedAt = now;
+    screen = Screen::DifficultySelect;
+    return;
+  }
+
+  if (screen == Screen::DifficultySelect && startupDemoDifficultyPending &&
+      now - startupTestChangedAt >= SELF_TEST_DIFFICULTY_INTERVAL_MS) {
+    if (startRun(now)) {
+      startupDemoDifficultyPending = false;
+    } else {
+      startupTestChangedAt = now;
+    }
   }
 }
 
@@ -799,7 +870,30 @@ void updateInputs(uint32_t now) {
       carouselSlide = 1;
       carouselChangedAt = now;
     }
-    if (pushInput.pressedEdge) startRun(now);
+    if (pushInput.pressedEdge) {
+      screen = Screen::DifficultySelect;
+      carouselChangedAt = now;
+    }
+    return;
+  }
+
+  if (screen == Screen::DifficultySelect) {
+    // The startup/repeating demo drives this popup deterministically.
+    if (startupTestActive || startupAutoPlay) return;
+    if (twistLeft.pressedEdge && selectedDifficulty > 0) {
+      --selectedDifficulty;
+      carouselChangedAt = now;
+    }
+    if (twistRight.pressedEdge && selectedDifficulty < 2) {
+      ++selectedDifficulty;
+      carouselChangedAt = now;
+    }
+    if (fullPullEdge) {
+      screen = Screen::Select;
+      carouselChangedAt = now;
+    } else if (pushInput.pressedEdge) {
+      startRun(now);
+    }
     return;
   }
 
@@ -873,6 +967,20 @@ void centeredSmallText(const char *text, int top, uint16_t color) {
   uint16_t width, height;
   display->getTextBounds(text, 0, 0, &x1, &y1, &width, &height);
   display->setCursor((64 - static_cast<int>(width)) / 2 - x1, top - y1);
+  display->print(text);
+  display->setFont(nullptr);
+}
+
+void smallTextCenteredAt(const char *text, int centerX, int top,
+                         uint16_t color) {
+  display->setFont(&Picopixel);
+  display->setTextSize(1);
+  display->setTextWrap(false);
+  display->setTextColor(color);
+  int16_t x1, y1;
+  uint16_t width, height;
+  display->getTextBounds(text, 0, 0, &x1, &y1, &width, &height);
+  display->setCursor(centerX - static_cast<int>(width) / 2 - x1, top - y1);
   display->print(text);
   display->setFont(nullptr);
 }
@@ -985,10 +1093,74 @@ void drawSelect(uint32_t now) {
   display->drawTriangle(62, 22, 58, 18, 58, 26, arrowBorder);
   centeredSmallText(songTitle(selectedSong), 43, rgb(255, 255, 255));
   char detail[16];
-  snprintf(detail, sizeof(detail), "%u BPM  D%u", songBpm(selectedSong),
-           songDifficulty(selectedSong) + 1);
+  snprintf(detail, sizeof(detail), "%u BPM", songBpm(selectedSong));
   centeredSmallText(detail, 50, rgb(255, 190, 0));
-  centeredSmallText("TWIST<> PUSH", 57, rgb(120, 255, 180));
+  centeredSmallText("PUSH:SELECT", 57, rgb(120, 255, 180));
+}
+
+uint16_t difficultyColor(uint8_t difficulty, float brightness = 1.0f) {
+  static const uint8_t colors[3][3] = {
+    {40, 255, 120},   // EASY
+    {255, 190, 0},    // NORM
+    {255, 45, 145},   // HARD
+  };
+  brightness = constrain(brightness, 0.0f, 1.0f);
+  return rgb(static_cast<uint8_t>(colors[difficulty][0] * brightness),
+             static_cast<uint8_t>(colors[difficulty][1] * brightness),
+             static_cast<uint8_t>(colors[difficulty][2] * brightness));
+}
+
+void drawDifficultySelect(uint32_t now) {
+  // This is an overlay on the existing song-select buffers. Do not clear or
+  // redraw the full matrix: the cover carousel and its title remain in place.
+  display->fillRoundRect(5, 5, 54, 33, 3, rgb(3, 3, 20));
+  display->drawRoundRect(5, 5, 54, 33, 3, rgb(0, 150, 220));
+  centeredSmallText("DIFFICULTY", 7, rgb(100, 220, 255));
+
+  // The carousel buffers may contain opposite phases of the flashing song
+  // arrows. Paint a stable version into both buffers while this overlay is
+  // active so buffer swaps cannot turn that phase difference into 30 Hz flash.
+  const uint16_t stableArrowBorder = rgb(0, 150, 220);
+  display->fillTriangle(1, 22, 5, 18, 5, 26, rgb(255, 255, 255));
+  display->fillTriangle(62, 22, 58, 18, 58, 26, rgb(255, 255, 255));
+  display->drawTriangle(1, 22, 5, 18, 5, 26, stableArrowBorder);
+  display->drawTriangle(62, 22, 58, 18, 58, 26, stableArrowBorder);
+
+  static const char *const names[3] = {"EASY", "NORM", "HARD"};
+  constexpr int centers[3] = {15, 32, 49};
+  for (uint8_t difficulty = 0; difficulty < 3; ++difficulty) {
+    const bool focused = difficulty == selectedDifficulty;
+    const int size = focused ? 12 : 10;
+    const int x = centers[difficulty] - size / 2;
+    const int y = focused ? 14 : 15;
+    const uint16_t accent = difficultyColor(difficulty);
+    display->fillRect(x, y, size, size,
+                      difficultyColor(difficulty, focused ? 0.22f : 0.08f));
+    display->drawRect(x, y, size, size,
+                      focused ? rgb(255, 255, 255)
+                              : difficultyColor(difficulty, 0.55f));
+
+    // One, two, or three beats make the density of each option readable even
+    // without relying on its colour.
+    const int bars = difficulty + 1;
+    const int barWidth = 2;
+    const int gap = 2;
+    const int patternWidth = bars * barWidth + (bars - 1) * gap;
+    const int patternX = centers[difficulty] - patternWidth / 2;
+    for (int bar = 0; bar < bars; ++bar) {
+      const int height = 3 + bar;
+      display->fillRect(patternX + bar * (barWidth + gap),
+                        y + size - height - 2, barWidth, height, accent);
+    }
+    smallTextCenteredAt(names[difficulty], centers[difficulty], 29, accent);
+  }
+
+  if (((now - carouselChangedAt) / 300) & 1) {
+    const int center = centers[selectedDifficulty];
+    display->drawPixel(center - 1, 12, rgb(255, 255, 255));
+    display->drawPixel(center, 12, rgb(255, 255, 255));
+    display->drawPixel(center + 1, 12, rgb(255, 255, 255));
+  }
 }
 
 int laneX(Lane lane) {
@@ -1392,6 +1564,8 @@ void drawEnd(bool failed) {
 void render(uint32_t now) {
   if (screen == Screen::Select) {
     drawSelect(now);
+  } else if (screen == Screen::DifficultySelect) {
+    drawDifficultySelect(now);
   } else if (screen == Screen::Playing) {
     drawPlaying(now);
   } else if (screen == Screen::Paused) {
@@ -1478,9 +1652,26 @@ bool rebuildDisplay(DisplayProfile profile) {
   releaseDisplayBuffers();
   // Give the I2S DMA driver a scheduling point after releasing its descriptors
   // before allocating a differently-sized set of buffers.
-  delay(2);
+  delay(10);
   uint8_t allocatedDepth = requestedDepth;
   if (!allocateDisplayBuffers(requestedDepth)) {
+    // The first select-to-game transition can briefly leave released DMA heap
+    // blocks unavailable. Retry the smaller gameplay allocation once after the
+    // allocator has had another scheduling interval; otherwise EASY can be
+    // skipped even though its chart loaded correctly.
+    if (profile == DisplayProfile::Game) {
+      Serial.printf("Gameplay DMA retry; heap=%u largest=%u\n",
+                    ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+      delay(25);
+      if (allocateDisplayBuffers(requestedDepth)) {
+        activeDmaColorDepth = requestedDepth;
+        activeDisplayProfile = profile;
+        Serial.printf("HUB75 game buffers recovered: %u-bit colour, %u Hz\n",
+                      activeDmaColorDepth,
+                      dmaDisplay->calculated_refresh_rate);
+        return true;
+      }
+    }
     // Selection can still operate if eight-bit double buffering does not fit
     // on a particular ESP32 revision. Do not repeatedly retry every frame.
     if (profile != DisplayProfile::Select ||
@@ -1541,9 +1732,12 @@ void loop() {
     return;
   }
 
-  const uint32_t now = millis();
+  uint32_t now = millis();
   updateInputs(now);
   updateStartupSelfTest(now);
+  // Either input path above may synchronously start a run and rebuild the DMA
+  // buffers. Refresh the frame clock before evaluating the newly started song.
+  now = millis();
   if ((screen == Screen::Results || screen == Screen::Failed) &&
       now - endShownAt >= 4500) {
     screen = Screen::Select;
@@ -1557,9 +1751,9 @@ void loop() {
   }
   updateRepeatingDemo(now);
 
-  const DisplayProfile desiredProfile = screen == Screen::Select
-                                            ? DisplayProfile::Select
-                                            : DisplayProfile::Game;
+  const DisplayProfile desiredProfile =
+      (screen == Screen::Select || screen == Screen::DifficultySelect)
+          ? DisplayProfile::Select : DisplayProfile::Game;
   if (desiredProfile != activeDisplayProfile &&
       !rebuildDisplay(desiredProfile)) {
     delay(100);

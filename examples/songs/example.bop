@@ -2,7 +2,6 @@
 title=EXAMPLE SONG
 artist=YOUR NAME
 bpm=120
-difficulty=1
 color=#8A32FF
 audio=/songs/example.wav
 cover=/songs/example.rgb888
@@ -10,8 +9,22 @@ audio_start=0
 audio_loop=0
 duration=12000
 
-# Notes receive implicit IDs 1, 2, 3... in file order.
-# note=hit_ms,lane,action[,hold_ms,end_action,transition_ms,bonus]
+mapping=0
+
+# EASY: sparse rhythmic landmarks.
+note=2000,twist,left
+note=3000,pull,half
+note=5000,pull,half,1600,full,800,0
+note=8000,pull,full,1600,half,800,1
+
+gimmick=1,wind,9000,1800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
+gimmick_note=1,5,column,1,0,1000
+note=10500,twist,left
+
+mapping=1
+
+# NORM: the same musical cues with more intermediate beats.
+# Notes receive implicit IDs 1, 2, 3... in file order within this mapping.
 note=2000,twist,left
 note=2500,push,tap
 note=3000,pull,half
@@ -29,4 +42,29 @@ note=8000,pull,full,1600,half,800,1
 # Gimmick note timings are offsets from the referenced gimmick's start.
 gimmick=3,wind,9000,1800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
 gimmick_note=3,8,column,1,0,1000
+note=10500,twist,left
+
+mapping=2
+
+# HARD: fixed timing windows, but a denser transcription.
+note=2000,twist,left
+note=2250,push,tap
+note=2500,push,tap
+note=2750,twist,right
+note=3000,pull,half
+note=3500,pull,full
+
+gimmick=1,screen_flash,4000,900,target=all,color=255:208:96,brightness=0.28,rate=4.0,pattern=checker
+
+note=4250,push,tap
+note=4500,twist,right,1000,same,0,0
+note=6000,pull,half,1600,full,800,0
+
+gimmick=2,lane_pulse,7000,1800,target=pull,color=64:96:255,brightness=0.20,rate=2.0,pattern=solid
+
+note=7750,push,tap
+note=8000,pull,full,1600,half,800,1
+
+gimmick=3,wind,9000,1800,target=all,color=35:130:180,brightness=1.0,direction=right,speed=1.0,density=4
+gimmick_note=3,12,column,1,0,1000
 note=10500,twist,left
