@@ -6,6 +6,10 @@
 
 #include "SongImport.h"
 
+#if !CONFIG_IDF_TARGET_ESP32S3
+#error "This pin map is for the Olimex ESP32-S3-DevKit-LiPo only"
+#endif
+
 // BOP Rhythm: two 64x32 HUB75 panels presented as one 64x64 display.
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
@@ -14,35 +18,37 @@
 #define PANEL_CHAIN (PANEL_ROWS * PANEL_COLS)
 #define PANEL_CHAIN_TYPE CHAIN_TOP_RIGHT_DOWN
 
-// Keep this known-good ESP32 WROOM-32 to HUB75 mapping unchanged.
-#define HUB75_R1   25
-#define HUB75_G1   26
-#define HUB75_B1   27
-#define HUB75_R2   14
-#define HUB75_G2   13
-#define HUB75_B2   33
-#define HUB75_A    23
-#define HUB75_B    19
-#define HUB75_C    18
-#define HUB75_D    17
+// Olimex ESP32-S3-DevKit-LiPo HUB75 mapping.
+#define HUB75_R1    4
+#define HUB75_G1    5
+#define HUB75_B1   21
+#define HUB75_R2    7
+#define HUB75_G2   15
+#define HUB75_B2   16
+#define HUB75_A    18
+#define HUB75_B     8
+#define HUB75_C     9
+#define HUB75_D     1
 #define HUB75_E    -1
-#define HUB75_LAT  32
-#define HUB75_OE   21
-#define HUB75_CLK  22
+#define HUB75_LAT  42
+#define HUB75_OE   17
+#define HUB75_CLK   2
 
-// GPIO34-39 are input-only and have no internal pull-ups. Fit external 10k
-// pull-ups and wire every switch active-low. GPIO16 uses its internal pull-up.
-#define PIN_TWIST_LEFT   34
-#define PIN_TWIST_RIGHT  35
-#define PIN_PUSH         36
-#define PIN_PULL_REST    39
-#define PIN_PULL_FULL    16
+// Five independent active-low inputs implement twist left/right, push, and the
+// pull mechanism's rest/full position switches. GPIO45 and GPIO46 both default
+// low during reset, so switches that only pull them to GND do not alter boot.
+// GPIO46 is a strap pin, but an active-low switch is safe: its reset default is
+// already low and GPIO0 remains high for normal SPI boot.
+#define PIN_TWIST_LEFT   10
+#define PIN_TWIST_RIGHT  11
+#define PIN_PUSH         39
+#define PIN_PULL_FULL    46
+#define PIN_PULL_REST    45
 
-// PCM5102A connections. The HUB75 driver uses I2S1 on the original ESP32,
-// leaving I2S0 for audio. These pins do not alter the display mapping above.
-#define PCM5102_BCK       4
-#define PCM5102_LCK       5
-#define PCM5102_DIN      15
+// On ESP32-S3 the HUB75 driver uses LCD_CAM, leaving I2S0 for audio.
+#define PCM5102_BCK      41
+#define PCM5102_LCK      40
+#define PCM5102_DIN      12
 #define AUDIO_I2S_PORT I2S_NUM_0
 #define AUDIO_SAMPLE_RATE 44100
 
@@ -198,10 +204,10 @@ struct DebouncedInput {
   }
 };
 
-DebouncedInput twistLeft{PIN_TWIST_LEFT, false};
-DebouncedInput twistRight{PIN_TWIST_RIGHT, false};
-DebouncedInput pushInput{PIN_PUSH, false};
-DebouncedInput pullRest{PIN_PULL_REST, false};
+DebouncedInput twistLeft{PIN_TWIST_LEFT, true};
+DebouncedInput twistRight{PIN_TWIST_RIGHT, true};
+DebouncedInput pushInput{PIN_PUSH, true};
+DebouncedInput pullRest{PIN_PULL_REST, true};
 DebouncedInput pullFull{PIN_PULL_FULL, true};
 
 volatile Screen screen = Screen::Select;
@@ -2688,7 +2694,7 @@ void setup() {
   startupTestChangedAt = carouselChangedAt;
   Serial.printf("BOP Rhythm ready; PCM5102A audio %s\n",
                 audioReady ? "enabled" : "disabled");
-  Serial.println(F("GPIO34/35/36/39 require external pull-ups"));
+  Serial.println(F("Olimex ESP32-S3 pin map active"));
 }
 
 void loop() {

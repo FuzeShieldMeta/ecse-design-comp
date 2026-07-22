@@ -1,60 +1,57 @@
 # BOP Rhythm
 
-BOP Rhythm is an ESP32-WROOM-32 rhythm game displayed on a 64×64 LED matrix
+BOP Rhythm is an Olimex ESP32-S3-DevKit-LiPo rhythm game displayed on a 64×64 LED matrix
 made from two daisy-chained 64×32 HUB75 panels. It uses a spring-return twist
 control, a push button, a two-switch pull control, and a PCM5102A DAC feeding an
 external amplifier and speaker.
 
 ## Hardware
 
-- ESP32-WROOM-32 38-pin development board
+- Olimex ESP32-S3-DevKit-LiPo (ESP32-S3-WROOM-1-N8R8)
 - Two 64×32 HUB75 LED panels
 - PCM5102A I²S DAC module
 - 60 W audio amplifier and compatible speaker
 - Twist-left and twist-right normally-open switches
 - One normally-open push button
 - Pull-rest and pull-full microswitches
-- Four 10 kΩ pull-up resistors for GPIO34, GPIO35, GPIO36, and GPIO39
 - Regulated panel, amplifier, and controller/DAC power supplies as required
 
 Disconnect all power before changing wiring. Never power the LED panels,
 amplifier, or speaker from an ESP32 GPIO pin.
 
-## Complete ESP32 pin allocation
+## Complete ESP32-S3 pin allocation
 
 | Component | Signal | ESP32 GPIO | Wiring notes |
 | --- | --- | ---: | --- |
-| HUB75 | R1 | 25 | Panel data input |
-| HUB75 | G1 | 26 | Panel data input |
-| HUB75 | B1 | 27 | Panel data input |
-| HUB75 | R2 | 14 | Panel data input |
-| HUB75 | G2 | 13 | Panel data input |
-| HUB75 | B2 | 33 | Panel data input |
-| HUB75 | A | 23 | Row address |
-| HUB75 | B | 19 | Row address |
-| HUB75 | C | 18 | Row address |
-| HUB75 | D | 17 | Row address |
+| HUB75 | R1 | 4 | Panel data input |
+| HUB75 | G1 | 5 | Panel data input |
+| HUB75 | B1 | 21 | Panel data input |
+| HUB75 | R2 | 7 | Panel data input |
+| HUB75 | G2 | 15 | Panel data input |
+| HUB75 | B2 | 16 | Panel data input |
+| HUB75 | A | 18 | Row address |
+| HUB75 | B | 8 | Row address |
+| HUB75 | C | 9 | Row address |
+| HUB75 | D | 1 | Row address |
 | HUB75 | E | Not connected | 1/16-scan 64×32 panels do not use E |
-| HUB75 | LAT / STB | 32 | Latch |
-| HUB75 | OE | 21 | Output enable |
-| HUB75 | CLK | 22 | Pixel clock |
-| Twist control | Left switch | 34 | Active-low; external 10 kΩ pull-up required |
-| Twist control | Right switch | 35 | Active-low; external 10 kΩ pull-up required |
-| Push control | Push button | 36 | Active-low; external 10 kΩ pull-up required |
-| Pull control | Rest microswitch | 39 | Active-low; external 10 kΩ pull-up required |
-| Pull control | Full microswitch | 16 | Active-low; firmware enables internal pull-up |
-| PCM5102A | BCK / BCLK | 4 | I²S bit clock |
-| PCM5102A | LCK / LRCK / WS | 5 | I²S left/right word clock |
-| PCM5102A | DIN / DATA | 15 | I²S audio data from ESP32 |
+| HUB75 | LAT / STB | 42 | Latch |
+| HUB75 | OE | 17 | Output enable |
+| HUB75 | CLK | 2 | Pixel clock |
+| Twist control | Left switch | 10 | Active-low |
+| Twist control | Right switch | 11 | Active-low |
+| Push control | Push button | 39 | Active-low |
+| Pull control | Rest microswitch | 45 | Active-low; closed at rest |
+| Pull control | Full microswitch | 46 | Active-low; closed at full extension |
+| PCM5102A | BCK / BCLK | 41 | I²S bit clock |
+| PCM5102A | LCK / LRCK / WS | 40 | I²S left/right word clock |
+| PCM5102A | DIN / DATA | 12 | I²S audio data from ESP32-S3 |
 | All low-voltage modules | GND | GND | All signal grounds must share a reference |
 
-The HUB75 mapping is fixed by the firmware. GPIO6 through GPIO11 are connected
-to the ESP32 module's flash and must not be used.
-
-GPIO4, GPIO5, and GPIO15 are ESP32 boot-strapping pins. A PCM5102A normally
-presents high-impedance inputs and should not disturb boot, but do not add
-pull-up or pull-down resistors to these three I²S lines. If the board fails to
-boot, disconnect the DAC while diagnosing its breakout-board circuitry.
+The HUB75 mapping is fixed by the firmware. On this N8R8 module, GPIO26 through
+GPIO32 are flash pins and GPIO35 through GPIO37 are octal-PSRAM pins. They must
+not be used. GPIO45 and GPIO46 are used only as active-low inputs. Their
+switches pull them to their reset-default low state, so they do not disturb the
+normal boot configuration.
 
 ## HUB75 panels
 
@@ -80,16 +77,16 @@ mapping to fix geometry.
 Every switch is wired active-low: one terminal connects to its assigned GPIO
 and the other terminal connects to GND. Never apply 5 V to an ESP32 input.
 
-GPIO34, GPIO35, GPIO36, and GPIO39 do not have internal pull-ups. For each of
-these pins, connect a 10 kΩ resistor between the GPIO and ESP32 3.3 V. GPIO16
-uses the ESP32's internal pull-up, although an external 10 kΩ pull-up may also
-be fitted for consistent noise immunity.
+The firmware enables each ESP32-S3 input's internal pull-up. External 10 kΩ
+pull-ups to 3.3 V are optional for long/noisy switch wiring. An external pull-up
+on GPIO46 prevents the normal BOOT button alone from selecting download mode;
+hold the GPIO46 switch low as well if manual download boot is required.
 
 ### Twist block
 
 - Centre/neutral: neither switch is closed.
-- Twist left: the GPIO34 switch closes to GND.
-- Twist right: the GPIO35 switch closes to GND.
+- Twist left: the GPIO10 switch closes to GND.
+- Twist right: the GPIO11 switch closes to GND.
 - The spring mechanism must return the block to centre when released.
 - The mechanics should prevent both twist switches closing simultaneously.
 - On song selection, twist moves through the circular song carousel. In the
@@ -98,16 +95,16 @@ be fitted for consistent noise immunity.
 
 ### Push button
 
-Use a normally-open momentary button between GPIO36 and GND. On the song-select
+Use a normally-open momentary button between GPIO39 and GND. On the song-select
 screen it opens the selected song's difficulty popup. Press it again to confirm
 the highlighted difficulty and start the song. During gameplay it controls the
 push lane.
 
 ### Pull mechanism
 
-- At 0% travel/rest, the GPIO39 rest microswitch is closed.
+- At 0% travel/rest, the GPIO45 rest microswitch is closed.
 - During a half pull, neither microswitch is closed.
-- At 100% travel/full pull, the GPIO16 full microswitch is closed.
+- At 100% travel/full pull, the GPIO46 full microswitch is closed.
 - Both switches closed at once is treated as a pull-mechanism fault.
 
 The firmware detects a half-pull action when the mechanism leaves the rest
@@ -141,15 +138,15 @@ Wire the digital side of the PCM5102A as follows:
 
 | PCM5102A pin | Connect to |
 | --- | --- |
-| BCK / BCLK | ESP32 GPIO4 |
-| LCK / LRCK / WS | ESP32 GPIO5 |
-| DIN / DATA | ESP32 GPIO15 |
+| BCK / BCLK | ESP32-S3 GPIO41 |
+| LCK / LRCK / WS | ESP32-S3 GPIO40 |
+| DIN / DATA | ESP32-S3 GPIO12 |
 | GND | ESP32 GND |
 | VIN | Supply voltage required by the specific breakout board |
 
 The ESP32 sends 44.1 kHz, 16-bit stereo I²S audio. The same program audio is
-placed on the left and right channels. The HUB75 driver uses ESP32 I²S1 and the
-PCM5102A uses I²S0, so both can operate simultaneously.
+placed on the left and right channels. On ESP32-S3 the HUB75 driver uses the
+LCD_CAM peripheral and the PCM5102A uses I²S0, so both can operate simultaneously.
 
 PCM5102A breakout-board power and configuration pins vary. Check the module's
 schematic before applying power: some boards accept 5 V at VIN through an
